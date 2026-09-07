@@ -1,4 +1,4 @@
-// ─── Dot in the Box — game engine ───────────────────────────────────────────
+// ─── Dots & Boxes — game engine ───────────────────────────────────────────
 // 10×10 dots → 9×9 = 81 boxes. Horizontal edges: 10 rows × 9, vertical: 9 × 10.
 
 export const DOTS = 10;
@@ -98,7 +98,7 @@ function adjacentBoxes(e: Edge): Array<[number, number]> {
   return out;
 }
 
-/** Apply a move. Strict alternation: turn always passes to the other player. */
+/** Apply a move. Classic rule: capturing a box grants an extra turn. */
 export function applyMove(s: GameState, e: Edge): MoveResult | null {
   if (s.over || edgeOwner(s, e) !== -1) return null;
 
@@ -126,7 +126,7 @@ export function applyMove(s: GameState, e: Edge): MoveResult | null {
       h,
       v,
       boxes,
-      current: (1 - s.current) as PlayerId, // strict alternation
+      current: (completedBoxes.length > 0 ? s.current : 1 - s.current) as PlayerId,
       turn,
       over: turn >= totalEdges,
     },

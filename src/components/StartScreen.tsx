@@ -1,11 +1,37 @@
 import { useState } from 'react';
+import { ArrowLeft, Bot, Globe, Users } from 'lucide-react';
 import { makeInitials } from '../game/engine';
 
 interface StartScreenProps {
   onStart: (redName: string, blueName: string) => void;
 }
 
+const MODES = [
+  {
+    key: 'offline',
+    icon: Users,
+    title: 'Play offline',
+    description: 'With someone next to you',
+    comingSoon: false,
+  },
+  {
+    key: 'online',
+    icon: Globe,
+    title: 'Play online',
+    description: 'With a random player',
+    comingSoon: true,
+  },
+  {
+    key: 'bot',
+    icon: Bot,
+    title: 'Play against a bot',
+    description: 'Test your skills vs AI',
+    comingSoon: true,
+  },
+] as const;
+
 export default function StartScreen({ onStart }: StartScreenProps) {
+  const [mode, setMode] = useState<'menu' | 'offline'>('menu');
   const [redName, setRedName] = useState('');
   const [blueName, setBlueName] = useState('');
 
@@ -15,21 +41,80 @@ export default function StartScreen({ onStart }: StartScreenProps) {
     if (ready) onStart(redName.trim(), blueName.trim());
   };
 
+  if (mode === 'menu') {
+    return (
+      <div className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-6 py-12">
+        {/* Wordmark */}
+        <div className="mb-2 flex items-center gap-2">
+          <span className="inline-block h-3 w-3 rounded-full bg-[#10131A]" />
+          <span className="inline-block h-3 w-3 rounded-full bg-[#10131A]" />
+          <span className="ml-1 h-[3px] w-8 rounded-full bg-[#FF1E1E]" />
+        </div>
+        <h1 className="text-[44px] font-extrabold leading-[1.05] tracking-[-0.04em] text-[#10131A]">
+          Dots &amp; Boxes
+        </h1>
+        <p className="mt-3 text-[15px] leading-relaxed text-[#5A6070]">
+          Take turns drawing lines — close a square and it's yours. Most squares
+          wins.
+        </p>
+
+        {/* Mode picker */}
+        <div className="mt-10 space-y-3">
+          {MODES.map(({ key, icon: Icon, title, description, comingSoon }) => (
+            <button
+              key={key}
+              onClick={() => !comingSoon && setMode('offline')}
+              disabled={comingSoon}
+              className="group relative flex w-full items-center gap-4 border border-[#E4E7EE] bg-white px-5 py-4 text-left transition-colors enabled:hover:border-[#10131A] disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-[#10131A] text-white">
+                <Icon size={20} strokeWidth={2.2} />
+              </span>
+              <span className="min-w-0">
+                <span className="block text-[16px] font-bold tracking-[-0.01em] text-[#10131A]">
+                  {title}
+                </span>
+                <span className="block text-[13px] text-[#8A91A1]">
+                  {description}
+                </span>
+              </span>
+              {comingSoon ? (
+                <span className="ml-auto shrink-0 bg-[#F1F3F8] px-2 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-[#8A91A1]">
+                  Coming soon
+                </span>
+              ) : (
+                <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                  <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#FF1E1E] transition-transform group-hover:scale-125" />
+                  <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#004EFF] transition-transform group-hover:scale-125" />
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        <p className="mt-8 text-center text-[12px] text-[#8A91A1]">
+          10 × 10 dots · 81 boxes · close a box to go again
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-6 py-12">
-      {/* Wordmark */}
-      <div className="mb-2 flex items-center gap-2">
-        <span className="inline-block h-3 w-3 rounded-full bg-[#10131A]" />
-        <span className="inline-block h-3 w-3 rounded-full bg-[#10131A]" />
-        <span className="ml-1 h-[3px] w-8 rounded-full bg-[#FF1E1E]" />
-      </div>
-      <h1 className="text-[44px] font-extrabold leading-[1.05] tracking-[-0.04em] text-[#10131A]">
-        Dot in the Box
+      {/* Back to mode picker */}
+      <button
+        onClick={() => setMode('menu')}
+        className="mb-8 flex w-fit items-center gap-1.5 text-[13px] font-bold text-[#8A91A1] transition-colors hover:text-[#10131A]"
+      >
+        <ArrowLeft size={15} strokeWidth={2.5} />
+        All modes
+      </button>
+
+      <h1 className="text-[34px] font-extrabold leading-[1.05] tracking-[-0.04em] text-[#10131A]">
+        Play offline
       </h1>
-      <p className="mt-3 text-[15px] leading-relaxed text-[#5A6070]">
-        Two players. One hundred dots. Take turns drawing lines between dots —
-        close a square and it's yours, marked with your initials. Most squares
-        wins.
+      <p className="mt-2 text-[15px] leading-relaxed text-[#5A6070]">
+        Two players, one screen. Enter your names to start.
       </p>
 
       {/* Players */}
@@ -99,7 +184,7 @@ export default function StartScreen({ onStart }: StartScreenProps) {
       </button>
 
       <p className="mt-4 text-center text-[12px] text-[#8A91A1]">
-        10 × 10 dots · 81 boxes · strict alternating turns
+        10 × 10 dots · 81 boxes · close a box to go again
       </p>
     </div>
   );

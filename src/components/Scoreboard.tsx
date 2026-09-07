@@ -1,3 +1,14 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog';
 import { scores } from '../game/engine';
 import type { GameState, Player } from '../game/engine';
 
@@ -56,12 +67,34 @@ export default function Scoreboard({ state, players, onNewGame }: ScoreboardProp
         })}
 
         <div className="flex flex-col items-end justify-start pt-1">
-          <button
-            onClick={onNewGame}
-            className="border border-[#E4E7EE] px-3 py-1.5 text-[12px] font-semibold text-[#5A6070] transition-colors hover:border-[#10131A] hover:text-[#10131A]"
-          >
-            New game
-          </button>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <button className="border border-[#E4E7EE] px-3 py-1.5 text-[12px] font-semibold text-[#5A6070] transition-colors hover:border-[#10131A] hover:text-[#10131A]">
+                New game
+              </button>
+            </AlertDialogTrigger>
+            <AlertDialogContent className="max-w-xs rounded-none border-[#EEF0F5] p-8 text-center shadow-[0_24px_60px_-24px_rgba(16,19,26,0.35)]">
+              <AlertDialogHeader className="text-center sm:text-center">
+                <AlertDialogTitle className="text-[20px] font-extrabold tracking-[-0.03em] text-[#10131A]">
+                  Start a new game?
+                </AlertDialogTitle>
+                <AlertDialogDescription className="text-[13px] text-[#5A6070]">
+                  The current game will be lost and you'll return to the start screen.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter className="mt-2 flex-col gap-2 sm:flex-col">
+                <AlertDialogAction
+                  onClick={onNewGame}
+                  className="w-full rounded-none bg-[#10131A] px-6 py-3 text-[15px] font-bold text-white hover:bg-[#10131A] hover:opacity-90"
+                >
+                  Yes, new game
+                </AlertDialogAction>
+                <AlertDialogCancel className="mt-0 w-full rounded-none border-0 px-6 py-3 text-[13px] font-semibold text-[#5A6070] shadow-none hover:bg-transparent hover:text-[#10131A]">
+                  Cancel
+                </AlertDialogCancel>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
           <p className="mt-2 text-[11px] tabular-nums text-[#8A91A1]">{claimed} / 81 boxes</p>
         </div>
       </div>

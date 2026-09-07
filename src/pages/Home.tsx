@@ -41,7 +41,7 @@ export default function Home() {
       <div className="mx-auto flex min-h-screen w-full max-w-[640px] flex-col px-5 py-6 sm:py-10">
         <header className="mb-6 flex items-center justify-between">
           <h1 className="text-[17px] font-extrabold tracking-[-0.03em] text-[#10131A]">
-            Dot in the Box
+            Dots &amp; Boxes
           </h1>
           <div className="flex items-center gap-1.5">
             <span className="inline-block h-2 w-2 rounded-full bg-[#FF1E1E]" />
@@ -62,7 +62,7 @@ export default function Home() {
         </div>
 
         <footer className="pt-4 text-center text-[11px] text-[#B8BECC]">
-          Click between two adjacent dots to draw a line · close a square to claim it
+          Click between two adjacent dots to draw a line · close a square to claim it and go again
         </footer>
       </div>
     </main>

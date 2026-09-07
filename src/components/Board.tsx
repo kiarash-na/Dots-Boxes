@@ -17,6 +17,12 @@ interface BoardProps {
 
 export default function Board({ state, players, onMove }: BoardProps) {
   const [hover, setHover] = useState<Edge | null>(null);
+  // Touch devices have no hover: first tap selects (preview), second tap confirms
+  const [selected, setSelected] = useState<Edge | null>(null);
+  const isTouch = useMemo(
+    () => window.matchMedia('(pointer: coarse)').matches,
+    []
+  );
 
   // All edges in stable order so React keys stay constant across renders
   const allEdges = useMemo<Edge[]>(() => {
@@ -36,6 +42,20 @@ export default function Board({ state, players, onMove }: BoardProps) {
       : { x1: dotX(e.col), y1: dotY(e.row), x2: dotX(e.col), y2: dotY(e.row + 1) };
 
   const current = players[state.current];
+
+  const handleTap = (e: Edge) => {
+    if (state.over) return;
+    if (!isTouch) {
+      onMove(e);
+      return;
+    }
+    if (selected && edgeKey(selected) === edgeKey(e)) {
+      setSelected(null);
+      onMove(e);
+    } else {
+      setSelected(e);
+    }
+  };
 
   return (
     <svg
@@ -101,20 +121,24 @@ export default function Board({ state, players, onMove }: BoardProps) {
         );
       })}
 
-      {/* Hover preview + endpoint highlights */}
-      {hover && !state.over && edgeOwner(state, hover) === -1 && (
-        <g pointerEvents="none">
-          <line
-            {...coords(hover)}
-            stroke={current.color}
-            strokeWidth={7}
-            strokeLinecap="round"
-            opacity={0.35}
-          />
-          <circle cx={coords(hover).x1} cy={coords(hover).y1} r={8} fill={current.color} />
-          <circle cx={coords(hover).x2} cy={coords(hover).y2} r={8} fill={current.color} />
-        </g>
-      )}
+      {/* Hover preview (desktop) + tap selection preview (touch) */}
+      {(() => {
+        const preview = isTouch ? selected : hover;
+        if (!preview || state.over || edgeOwner(state, preview) !== -1) return null;
+        return (
+          <g pointerEvents="none">
+            <line
+              {...coords(preview)}
+              stroke={current.color}
+              strokeWidth={7}
+              strokeLinecap="round"
+              opacity={isTouch ? 0.6 : 0.35}
+            />
+            <circle cx={coords(preview).x1} cy={coords(preview).y1} r={8} fill={current.color} />
+            <circle cx={coords(preview).x2} cy={coords(preview).y2} r={8} fill={current.color} />
+          </g>
+        );
+      })()}
 
       {/* Hit areas (only free edges) */}
       {allEdges.map((e) => {
@@ -128,9 +152,9 @@ export default function Board({ state, players, onMove }: BoardProps) {
             strokeWidth={26}
             strokeLinecap="round"
             className={state.over ? '' : 'cursor-pointer'}
-            onMouseEnter={() => !state.over && setHover(e)}
+            onMouseEnter={() => !state.over && !isTouch && setHover(e)}
             onMouseLeave={() => setHover((h) => (h && edgeKey(h) === k ? null : h))}
-            onClick={() => !state.over && onMove(e)}
+            onClick={() => handleTap(e)}
           />
         );
       })}

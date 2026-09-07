@@ -1,11 +1,11 @@
-# Dot in the Box
+# Dots & Boxes
 
 A two-player **Dots and Boxes** game for the browser. Take turns drawing lines
 between adjacent dots on a 10×10 grid — close a square to claim it with your
 initials. Most boxes wins.
 
 - 10 × 10 dots · 81 boxes
-- Strict alternating turns (claiming a box does not grant an extra turn)
+- Classic rule: closing a box grants an extra turn
 - Local two-player: enter two names, share one screen
 - SVG board with hover previews and capture animations
 
