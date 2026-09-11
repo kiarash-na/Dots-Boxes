@@ -13,9 +13,10 @@ interface BoardProps {
   state: GameState;
   players: [Player, Player];
   onMove: (e: Edge) => void;
+  locked?: boolean; // bot's turn — human input and previews suppressed
 }
 
-export default function Board({ state, players, onMove }: BoardProps) {
+export default function Board({ state, players, onMove, locked = false }: BoardProps) {
   const [hover, setHover] = useState<Edge | null>(null);
   // Touch devices have no hover: first tap selects (preview), second tap confirms
   const [selected, setSelected] = useState<Edge | null>(null);
@@ -23,6 +24,13 @@ export default function Board({ state, players, onMove }: BoardProps) {
     () => window.matchMedia('(pointer: coarse)').matches,
     []
   );
+
+  // Drop an armed touch selection whenever a line is drawn (opponent or bot moved)
+  const [prevTurn, setPrevTurn] = useState(state.turn);
+  if (prevTurn !== state.turn) {
+    setPrevTurn(state.turn);
+    setSelected(null);
+  }
 
   // All edges in stable order so React keys stay constant across renders
   const allEdges = useMemo<Edge[]>(() => {
@@ -44,7 +52,7 @@ export default function Board({ state, players, onMove }: BoardProps) {
   const current = players[state.current];
 
   const handleTap = (e: Edge) => {
-    if (state.over) return;
+    if (state.over || locked) return;
     if (!isTouch) {
       onMove(e);
       return;
@@ -124,7 +132,7 @@ export default function Board({ state, players, onMove }: BoardProps) {
       {/* Hover preview (desktop) + tap selection preview (touch) */}
       {(() => {
         const preview = isTouch ? selected : hover;
-        if (!preview || state.over || edgeOwner(state, preview) !== -1) return null;
+        if (!preview || state.over || locked || edgeOwner(state, preview) !== -1) return null;
         return (
           <g pointerEvents="none">
             <line
@@ -151,8 +159,8 @@ export default function Board({ state, players, onMove }: BoardProps) {
             stroke="transparent"
             strokeWidth={26}
             strokeLinecap="round"
-            className={state.over ? '' : 'cursor-pointer'}
-            onMouseEnter={() => !state.over && !isTouch && setHover(e)}
+            className={state.over || locked ? '' : 'cursor-pointer'}
+            onMouseEnter={() => !state.over && !locked && !isTouch && setHover(e)}
             onMouseLeave={() => setHover((h) => (h && edgeKey(h) === k ? null : h))}
             onClick={() => handleTap(e)}
           />

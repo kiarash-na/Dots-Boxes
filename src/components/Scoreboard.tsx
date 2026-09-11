@@ -1,14 +1,6 @@
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from '@/components/ui/alert-dialog';
+import ConfirmDialog from './ConfirmDialog';
+import { DIFFICULTIES } from '../game/bot';
+import type { Difficulty } from '../game/bot';
 import { scores } from '../game/engine';
 import type { GameState, Player } from '../game/engine';
 
@@ -16,11 +8,20 @@ interface ScoreboardProps {
   state: GameState;
   players: [Player, Player];
   onNewGame: () => void;
+  botDifficulty?: Difficulty | null;
+  onChangeDifficulty?: (d: Difficulty) => void;
 }
 
-export default function Scoreboard({ state, players, onNewGame }: ScoreboardProps) {
+export default function Scoreboard({
+  state,
+  players,
+  onNewGame,
+  botDifficulty = null,
+  onChangeDifficulty,
+}: ScoreboardProps) {
   const [a, b] = scores(state);
   const claimed = a + b;
+  const showDifficulty = botDifficulty != null && onChangeDifficulty;
 
   return (
     <div className="w-full">
@@ -28,6 +29,7 @@ export default function Scoreboard({ state, players, onNewGame }: ScoreboardProp
         {[0, 1].map((i) => {
           const p = players[i];
           const active = !state.over && state.current === i;
+          const botThinking = active && botDifficulty != null && i === 1;
           return (
             <div key={p.color} className="flex-1">
               <div className="flex items-center gap-2">
@@ -59,7 +61,7 @@ export default function Scoreboard({ state, players, onNewGame }: ScoreboardProp
               </div>
               {active && (
                 <p className="mt-2 text-[12px] font-semibold" style={{ color: p.color }}>
-                  · your turn
+                  {botThinking ? '· thinking…' : '· your turn'}
                 </p>
               )}
             </div>
@@ -67,37 +69,55 @@ export default function Scoreboard({ state, players, onNewGame }: ScoreboardProp
         })}
 
         <div className="flex flex-col items-end justify-start pt-1">
-          <AlertDialog>
-            <AlertDialogTrigger asChild>
+          <ConfirmDialog
+            trigger={
               <button className="border border-[#E4E7EE] px-3 py-1.5 text-[12px] font-semibold text-[#5A6070] transition-colors hover:border-[#10131A] hover:text-[#10131A]">
                 New game
               </button>
-            </AlertDialogTrigger>
-            <AlertDialogContent className="max-w-xs rounded-none border-[#EEF0F5] p-8 text-center shadow-[0_24px_60px_-24px_rgba(16,19,26,0.35)]">
-              <AlertDialogHeader className="text-center sm:text-center">
-                <AlertDialogTitle className="text-[20px] font-extrabold tracking-[-0.03em] text-[#10131A]">
-                  Start a new game?
-                </AlertDialogTitle>
-                <AlertDialogDescription className="text-[13px] text-[#5A6070]">
-                  The current game will be lost and you'll return to the start screen.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter className="mt-2 flex-col gap-2 sm:flex-col">
-                <AlertDialogAction
-                  onClick={onNewGame}
-                  className="w-full rounded-none bg-[#10131A] px-6 py-3 text-[15px] font-bold text-white hover:bg-[#10131A] hover:opacity-90"
-                >
-                  Yes, new game
-                </AlertDialogAction>
-                <AlertDialogCancel className="mt-0 w-full rounded-none border-0 px-6 py-3 text-[13px] font-semibold text-[#5A6070] shadow-none hover:bg-transparent hover:text-[#10131A]">
-                  Cancel
-                </AlertDialogCancel>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+            }
+            title="Start a new game?"
+            description="The current game will be lost and you'll return to the start screen."
+            actionLabel="Yes, new game"
+            onConfirm={onNewGame}
+          />
           <p className="mt-2 text-[11px] tabular-nums text-[#8A91A1]">{claimed} / 81 boxes</p>
         </div>
       </div>
+
+      {showDifficulty && (
+        <div className="mt-4 flex items-center gap-2">
+          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[#8A91A1]">
+            Bot
+          </span>
+          {DIFFICULTIES.map(({ key, label }) => {
+            const active = botDifficulty === key;
+            const btn = (
+              <button
+                key={key}
+                disabled={active}
+                className={`border px-3 py-1.5 text-[11px] font-semibold transition-colors ${
+                  active
+                    ? 'border-[#10131A] text-[#10131A]'
+                    : 'border-[#E4E7EE] text-[#5A6070] hover:border-[#10131A] hover:text-[#10131A]'
+                }`}
+              >
+                {label}
+              </button>
+            );
+            if (active) return btn;
+            return (
+              <ConfirmDialog
+                key={key}
+                trigger={btn}
+                title={`Switch to ${label}?`}
+                description="The bot's strength changes from its next move. The current game continues."
+                actionLabel="Yes, switch"
+                onConfirm={() => onChangeDifficulty(key)}
+              />
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

@@ -86,7 +86,7 @@ export function isBoxComplete(s: GameState, br: number, bc: number): boolean {
 }
 
 /** Boxes adjacent to an edge (0–2 candidates). */
-function adjacentBoxes(e: Edge): Array<[number, number]> {
+export function adjacentBoxes(e: Edge): Array<[number, number]> {
   const out: Array<[number, number]> = [];
   if (e.orientation === 'h') {
     if (e.row > 0) out.push([e.row - 1, e.col]); // box above

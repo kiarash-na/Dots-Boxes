@@ -1,32 +1,64 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Board from '../components/Board';
 import GameOver from '../components/GameOver';
 import Scoreboard from '../components/Scoreboard';
 import StartScreen from '../components/StartScreen';
+import { chooseMove } from '../game/bot';
+import type { Difficulty } from '../game/bot';
 import { BLUE, RED, applyMove, makeInitials, newGame } from '../game/engine';
 import type { Edge, GameState, Player } from '../game/engine';
 
 export default function Home() {
   const [players, setPlayers] = useState<[Player, Player] | null>(null);
   const [state, setState] = useState<GameState>(newGame);
+  const [bot, setBot] = useState<{ side: 1; difficulty: Difficulty } | null>(null);
 
-  const start = useCallback((redName: string, blueName: string) => {
+  const start = useCallback((redName: string, blueName: string, botDifficulty?: Difficulty) => {
     setPlayers([
       { ...RED, name: redName, initials: makeInitials(redName) },
       { ...BLUE, name: blueName, initials: makeInitials(blueName) },
     ]);
+    setBot(botDifficulty ? { side: 1, difficulty: botDifficulty } : null);
     setState(newGame());
   }, []);
 
-  const move = useCallback((e: Edge) => {
-    setState((s) => applyMove(s, e)?.next ?? s);
+  const setDifficulty = useCallback((d: Difficulty) => {
+    setBot((b) => (b ? { ...b, difficulty: d } : b));
   }, []);
+
+  const move = useCallback(
+    (e: Edge) => {
+      setState((s) =>
+        bot && s.current === bot.side ? s : (applyMove(s, e)?.next ?? s)
+      );
+    },
+    [bot]
+  );
 
   const rematch = useCallback(() => setState(newGame()), []);
   const newPlayers = useCallback(() => {
     setPlayers(null);
+    setBot(null);
     setState(newGame());
   }, []);
+
+  const botTurn = bot !== null && !state.over && state.current === bot.side;
+
+  // Bot driver: one move per timer so capture chains play out visibly.
+  useEffect(() => {
+    if (!botTurn || !bot) return;
+    const t = setTimeout(
+      () => {
+        setState((s) =>
+          s.over || s.current !== bot.side
+            ? s
+            : (applyMove(s, chooseMove(s, bot.difficulty))?.next ?? s)
+        );
+      },
+      450 + Math.random() * 300
+    );
+    return () => clearTimeout(t);
+  }, [botTurn, bot, state]);
 
   if (!players) {
     return (
@@ -49,10 +81,16 @@ export default function Home() {
           </div>
         </header>
 
-        <Scoreboard state={state} players={players} onNewGame={newPlayers} />
+        <Scoreboard
+          state={state}
+          players={players}
+          onNewGame={newPlayers}
+          botDifficulty={bot?.difficulty ?? null}
+          onChangeDifficulty={setDifficulty}
+        />
 
         <div className="relative mt-6 flex-1">
-          <Board state={state} players={players} onMove={move} />
+          <Board state={state} players={players} onMove={move} locked={botTurn} />
           <GameOver
             state={state}
             players={players}
