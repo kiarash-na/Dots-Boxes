@@ -6,9 +6,20 @@ interface GameOverProps {
   players: [Player, Player];
   onRematch: () => void;
   onNewPlayers: () => void;
+  rematchLabel?: string;
+  rematchDisabled?: boolean;
+  secondaryLabel?: string;
 }
 
-export default function GameOver({ state, players, onRematch, onNewPlayers }: GameOverProps) {
+export default function GameOver({
+  state,
+  players,
+  onRematch,
+  onNewPlayers,
+  rematchLabel = 'Rematch',
+  rematchDisabled = false,
+  secondaryLabel = 'New players',
+}: GameOverProps) {
   if (!state.over) return null;
 
   const [a, b] = scores(state);
@@ -50,15 +61,16 @@ export default function GameOver({ state, players, onRematch, onNewPlayers }: Ga
         <div className="mt-7 space-y-2">
           <button
             onClick={onRematch}
-            className="w-full bg-[#10131A] px-6 py-3 text-[15px] font-bold text-white transition-opacity hover:opacity-90"
+            disabled={rematchDisabled}
+            className="w-full bg-[#10131A] px-6 py-3 text-[15px] font-bold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Rematch
+            {rematchLabel}
           </button>
           <button
             onClick={onNewPlayers}
             className="w-full px-6 py-3 text-[13px] font-semibold text-[#5A6070] transition-colors hover:text-[#10131A]"
           >
-            New players
+            {secondaryLabel}
           </button>
         </div>
       </div>

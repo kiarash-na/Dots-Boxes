@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router';
 import Board from '../components/Board';
 import GameOver from '../components/GameOver';
 import Scoreboard from '../components/Scoreboard';
@@ -9,6 +10,7 @@ import { BLUE, RED, applyMove, makeInitials, newGame } from '../game/engine';
 import type { Edge, GameState, Player } from '../game/engine';
 
 export default function Home() {
+  const navigate = useNavigate();
   const [players, setPlayers] = useState<[Player, Player] | null>(null);
   const [state, setState] = useState<GameState>(newGame);
   const [bot, setBot] = useState<{ side: 1; difficulty: Difficulty } | null>(null);
@@ -63,7 +65,7 @@ export default function Home() {
   if (!players) {
     return (
       <main className="min-h-screen bg-white">
-        <StartScreen onStart={start} />
+        <StartScreen onStart={start} onPlayOnline={() => navigate('/online')} />
       </main>
     );
   }
