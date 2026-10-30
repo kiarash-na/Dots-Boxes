@@ -10,6 +10,6 @@
   "vars": {
     // Comma-separated browser origins allowed to open a WebSocket (besides
     // localhost). Set this to your production frontend domain before deploy.
-    "ALLOWED_ORIGINS": "https://dots-boxes.vercel.app"
+    "ALLOWED_ORIGINS": "https://game-by-auveen.vercel.app"
   }
 }
