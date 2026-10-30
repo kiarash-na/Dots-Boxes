@@ -6,6 +6,7 @@ import { makeInitials } from '../game/engine';
 
 interface StartScreenProps {
   onStart: (redName: string, blueName: string, botDifficulty?: Difficulty) => void;
+  onPlayOnline: () => void;
 }
 
 const MODES = [
@@ -21,7 +22,7 @@ const MODES = [
     icon: Globe,
     title: 'Play online',
     description: 'With a random player',
-    comingSoon: true,
+    comingSoon: false,
   },
   {
     key: 'bot',
@@ -32,7 +33,7 @@ const MODES = [
   },
 ] as const;
 
-export default function StartScreen({ onStart }: StartScreenProps) {
+export default function StartScreen({ onStart, onPlayOnline }: StartScreenProps) {
   const [mode, setMode] = useState<'menu' | 'offline' | 'bot'>('menu');
   const [redName, setRedName] = useState('');
   const [blueName, setBlueName] = useState('');
@@ -71,7 +72,7 @@ export default function StartScreen({ onStart }: StartScreenProps) {
           {MODES.map(({ key, icon: Icon, title, description, comingSoon }) => (
             <button
               key={key}
-              onClick={() => !comingSoon && setMode(key)}
+              onClick={() => (key === 'online' ? onPlayOnline() : !comingSoon && setMode(key))}
               disabled={comingSoon}
               className="group relative flex w-full items-center gap-4 border border-[#E4E7EE] bg-white px-5 py-4 text-left transition-colors enabled:hover:border-[#10131A] disabled:cursor-not-allowed disabled:opacity-60"
             >

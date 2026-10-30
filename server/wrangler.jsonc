@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dots-boxes-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-01",
+  "durable_objects": {
+    "bindings": [{ "name": "Lobby", "class_name": "Lobby" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Lobby"] }],
+  "vars": {
+    // Comma-separated browser origins allowed to open a WebSocket (besides
+    // localhost). Set this to your production frontend domain before deploy.
+    "ALLOWED_ORIGINS": "https://game-by-auveen.vercel.app"
+  }
+}

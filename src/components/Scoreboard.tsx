@@ -2,7 +2,7 @@ import ConfirmDialog from './ConfirmDialog';
 import { DIFFICULTIES } from '../game/bot';
 import type { Difficulty } from '../game/bot';
 import { scores } from '../game/engine';
-import type { GameState, Player } from '../game/engine';
+import type { GameState, Player, PlayerId } from '../game/engine';
 
 interface ScoreboardProps {
   state: GameState;
@@ -10,6 +10,12 @@ interface ScoreboardProps {
   onNewGame: () => void;
   botDifficulty?: Difficulty | null;
   onChangeDifficulty?: (d: Difficulty) => void;
+  /** Online play: which side is the local player — turn label reads "your/their turn". */
+  selfSide?: PlayerId | null;
+  newGameLabel?: string;
+  newGameConfirmTitle?: string;
+  newGameConfirmDescription?: string;
+  newGameConfirmAction?: string;
 }
 
 export default function Scoreboard({
@@ -18,6 +24,11 @@ export default function Scoreboard({
   onNewGame,
   botDifficulty = null,
   onChangeDifficulty,
+  selfSide = null,
+  newGameLabel = 'New game',
+  newGameConfirmTitle = 'Start a new game?',
+  newGameConfirmDescription = "The current game will be lost and you'll return to the start screen.",
+  newGameConfirmAction = 'Yes, new game',
 }: ScoreboardProps) {
   const [a, b] = scores(state);
   const claimed = a + b;
@@ -61,7 +72,11 @@ export default function Scoreboard({
               </div>
               {active && (
                 <p className="mt-2 text-[12px] font-semibold" style={{ color: p.color }}>
-                  {botThinking ? '· thinking…' : '· your turn'}
+                  {botThinking
+                    ? '· thinking…'
+                    : selfSide === null || i === selfSide
+                      ? '· your turn'
+                      : '· their turn'}
                 </p>
               )}
             </div>
@@ -72,12 +87,12 @@ export default function Scoreboard({
           <ConfirmDialog
             trigger={
               <button className="border border-[#E4E7EE] px-3 py-1.5 text-[12px] font-semibold text-[#5A6070] transition-colors hover:border-[#10131A] hover:text-[#10131A]">
-                New game
+                {newGameLabel}
               </button>
             }
-            title="Start a new game?"
-            description="The current game will be lost and you'll return to the start screen."
-            actionLabel="Yes, new game"
+            title={newGameConfirmTitle}
+            description={newGameConfirmDescription}
+            actionLabel={newGameConfirmAction}
             onConfirm={onNewGame}
           />
           <p className="mt-2 text-[11px] tabular-nums text-[#8A91A1]">{claimed} / 81 boxes</p>

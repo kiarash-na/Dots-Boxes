@@ -120,3 +120,19 @@
     transform: translateY(0) scale(1);
   }
 }
+
+/* Match-offer countdown bar — duration set inline, shrinks to zero */
+.offer-countdown {
+  transform-origin: left;
+  animation-name: offer-countdown;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+@keyframes offer-countdown {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}

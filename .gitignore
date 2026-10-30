@@ -4,6 +4,10 @@ node_modules/
 # Build output
 dist/
 dist-ssr/
+*.tsbuildinfo
+
+# Wrangler local state (Cloudflare Workers dev)
+.wrangler/
 
 # Env files
 .env
