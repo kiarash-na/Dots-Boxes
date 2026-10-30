@@ -4,8 +4,8 @@
 // authoritative moves, wrong-turn rejection, full game, rematch + side swap,
 // leaving, offer decline order, malformed-message kicks, origin allowlist.
 
-const URL = 'ws://localhost:8787/parties/lobby/global';
-const ORIGIN = 'http://localhost:3000';
+const URL = process.env.SMOKE_URL ?? 'ws://localhost:8787/parties/lobby/global';
+const ORIGIN = process.env.SMOKE_ORIGIN ?? 'http://localhost:3000';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
