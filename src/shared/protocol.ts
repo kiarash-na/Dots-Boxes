@@ -1,37 +1,20 @@
 // ─── Online protocol — messages between browser client and lobby server ────
-// Client→Server messages are validated on the server with the zod schemas
-// below (the security boundary). Server→Client messages are plain types: the
-// server is authoritative and clients may trust its payloads.
+// Pure types, zero dependencies: this file is imported by the Vite client AND
+// the Cloudflare server, so it must not pull any package (module resolution
+// differs between the two environments). The runtime validation of
+// ClientMessage lives in server/src/schema.ts (zod), where zod resolves from
+// the server's own node_modules.
 
-import { z } from 'zod';
-import { BOXES, DOTS } from '../game/engine';
 import type { Edge, PlayerId } from '../game/engine';
 
-// Edge coordinates bounded by the board: horizontal edges live in a
-// DOTS × BOXES grid, vertical edges in a BOXES × DOTS grid.
-export const edgeSchema = z.discriminatedUnion('orientation', [
-  z.object({
-    orientation: z.literal('h'),
-    row: z.number().int().min(0).max(DOTS - 1),
-    col: z.number().int().min(0).max(BOXES - 1),
-  }),
-  z.object({
-    orientation: z.literal('v'),
-    row: z.number().int().min(0).max(BOXES - 1),
-    col: z.number().int().min(0).max(DOTS - 1),
-  }),
-]);
-
-export const clientMessageSchema = z.discriminatedUnion('t', [
-  z.object({ t: z.literal('enqueue') }), // join the matchmaking queue
-  z.object({ t: z.literal('dequeue') }), // leave the queue (declines a pending offer)
-  z.object({ t: z.literal('offer_response'), accept: z.boolean() }),
-  z.object({ t: z.literal('move'), edge: edgeSchema }),
-  z.object({ t: z.literal('sync') }), // request a full state resend (desync recovery)
-  z.object({ t: z.literal('rematch') }), // request / accept a rematch after game over
-  z.object({ t: z.literal('leave_match') }), // resign / walk away from a match
-]);
-export type ClientMessage = z.infer<typeof clientMessageSchema>;
+export type ClientMessage =
+  | { t: 'enqueue' } // join the matchmaking queue
+  | { t: 'dequeue' } // leave the queue (declines a pending offer)
+  | { t: 'offer_response'; accept: boolean }
+  | { t: 'move'; edge: Edge }
+  | { t: 'sync' } // request a full state resend (desync recovery)
+  | { t: 'rematch' } // request / accept a rematch after game over
+  | { t: 'leave_match' }; // resign / walk away from a match
 
 // ─── Server → Client ────────────────────────────────────────────────────────
 

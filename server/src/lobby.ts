@@ -9,7 +9,7 @@ import { Server } from 'partyserver';
 import type { Connection } from 'partyserver';
 import { applyMove, newGame } from '../../src/game/engine';
 import type { GameState, PlayerId } from '../../src/game/engine';
-import { clientMessageSchema } from '../../src/shared/protocol';
+import { clientMessageSchema } from './schema';
 import type { LobbyPlayer, ServerMessage } from '../../src/shared/protocol';
 import { serializeState } from '../../src/shared/state';
 import { randomName } from './names';
