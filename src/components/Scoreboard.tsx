@@ -57,6 +57,11 @@ export default function Scoreboard({
                 >
                   {p.name}
                 </span>
+                {p.tag && (
+                  <span className="text-[10px] font-semibold tabular-nums text-[#8A91A1]">
+                    #{p.tag}
+                  </span>
+                )}
               </div>
               <div
                 className="mt-1 text-[52px] font-extrabold leading-none tracking-[-0.04em] text-[#10131A] transition-opacity"

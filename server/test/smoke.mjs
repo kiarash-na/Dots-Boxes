@@ -3,7 +3,8 @@
 // Exercises: welcome/names, lobby broadcast, FIFO queue, match offers,
 // authoritative moves, wrong-turn rejection, full game, rematch + side swap,
 // leaving, offer decline order, malformed-message kicks, origin allowlist,
-// reconnect-and-resume within the grace period, tab takeover, turn timeout.
+// reconnect-and-resume within the grace period, tab takeover, turn timeout,
+// letter + 4-digit-tag identities, direct challenges and their rate limits.
 // Set SMOKE_SLOW=1 to also wait out the 90s reconnect grace period.
 
 const URL = process.env.SMOKE_URL ?? 'ws://localhost:8787/parties/lobby/global';
@@ -21,11 +22,14 @@ function assert(cond, label) {
 }
 
 class TestClient {
-  constructor(tag, origin = ORIGIN, token = null) {
+  constructor(tag, origin = ORIGIN, token = null, initial = 'T') {
     this.tag = tag;
     this.backlog = [];
     this.waiters = [];
-    const url = token ? `${URL}?token=${token}` : URL;
+    const q = new URLSearchParams();
+    if (token) q.set('token', token);
+    if (initial !== null) q.set('initial', initial);
+    const url = `${URL}?${q}`;
     this.ws = new WebSocket(url, { headers: { Origin: origin } });
     this.opened = new Promise((res, rej) => {
       this.ws.addEventListener('open', res, { once: true });
@@ -89,18 +93,23 @@ function firstFree(board) {
 
 async function main() {
   console.log('— connect & lobby —');
-  const a = new TestClient('A');
-  const b = new TestClient('B');
+  const a = new TestClient('A', ORIGIN, null, 'k');
+  const b = new TestClient('B', ORIGIN, null, 'K');
   await Promise.all([a.opened, b.opened]);
   const [wa, wb] = await Promise.all([a.waitFor('welcome'), b.waitFor('welcome')]);
-  assert(wa.name && wb.name, 'both clients got random names');
-  assert(wa.name !== wb.name, `names are unique (${wa.name} / ${wb.name})`);
+  assert(wa.me.initial === 'K' && wb.me.initial === 'K', 'chosen letter kept (upper-cased)');
+  assert(/^\d{4}$/.test(wa.me.tag) && /^\d{4}$/.test(wb.me.tag), 'both got a 4-digit tag');
+  assert(wa.me.tag !== wb.me.tag, `tags are unique (${wa.me.tag} / ${wb.me.tag})`);
+  const bad = new TestClient('BADNAME', ORIGIN, null, 'Robert');
+  const wbad = await bad.waitFor('welcome');
+  assert(wbad.me.initial === '?', 'more than one letter is refused');
+  bad.close();
 
   // Snapshots arrive on every join; wait for one that shows both players.
   let la = await a.waitFor('lobby');
   for (let i = 0; i < 10 && la.players.length < 2; i++) la = await a.waitFor('lobby');
   assert(la.players.length >= 2, 'lobby lists both players');
-  assert(la.players.some((p) => p.name === wa.name), 'lobby contains A');
+  assert(la.players.some((p) => p.tag === wa.me.tag), 'lobby contains A');
 
   console.log('— queue & offer —');
   a.send({ t: 'enqueue' });
@@ -108,8 +117,8 @@ async function main() {
   const [qa, qb] = await Promise.all([a.waitFor('queue'), b.waitFor('queue')]);
   // Both may get several queue updates; final positions must be 1 and 2.
   const [oa, ob] = await Promise.all([a.waitFor('offer'), b.waitFor('offer')]);
-  assert(oa.opponentName === wb.name, 'A offered B by name');
-  assert(ob.opponentName === wa.name, 'B offered A by name');
+  assert(oa.opponent.tag === wb.me.tag && oa.kind === 'queue', 'A offered B');
+  assert(ob.opponent.tag === wa.me.tag, 'B offered A');
   void qa;
   void qb;
 
@@ -171,7 +180,7 @@ async function main() {
   console.log('— rematch with swapped colors —');
   a.send({ t: 'rematch' });
   const rr = await b.waitFor('rematch_requested');
-  assert(rr.byName === wa.name, 'opponent notified of rematch request');
+  assert(rr.by.tag === wa.me.tag, 'opponent notified of rematch request');
   b.send({ t: 'rematch' });
   const [rsA, rsB] = await Promise.all([a.waitFor('match_start'), b.waitFor('match_start')]);
   assert(rsA.side === 1 - msA.side && rsB.side === 1 - msB.side, 'sides swapped on rematch');
@@ -220,10 +229,57 @@ async function main() {
   a.close();
   b.close();
 
+  await challengeTests();
   await reconnectTests();
 
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
+}
+
+async function challengeTests() {
+  console.log('— direct challenges —');
+  const cs = ['C1', 'C2', 'C3', 'C4', 'C5'].map((t) => new TestClient(t));
+  await Promise.all(cs.map((c) => c.opened));
+  const ws = await Promise.all(cs.map((c) => c.waitFor('welcome')));
+  const [c1, c2, c3, c4, c5] = cs;
+
+  c1.send({ t: 'challenge', tag: ws[1].me.tag });
+  const [o1, o2] = await Promise.all([c1.waitFor('offer'), c2.waitFor('offer')]);
+  assert(o1.kind === 'challenge' && o1.fromMe && o1.opponent.tag === ws[1].me.tag, 'challenger sees request sent');
+  assert(!o2.fromMe && o2.opponent.tag === ws[0].me.tag, 'target sees who challenges them');
+  c2.send({ t: 'offer_response', accept: false });
+  const dc = await c1.waitFor('offer_cancelled');
+  assert(dc.reason === 'declined', 'challenger told it was declined');
+
+  c1.send({ t: 'challenge', tag: ws[1].me.tag });
+  const cd = await c1.waitFor('challenge_failed');
+  assert(cd.reason === 'cooldown', 'cannot re-challenge the same player right away');
+
+  for (const [c, w] of [[c3, ws[2]], [c4, ws[3]]]) {
+    c1.send({ t: 'challenge', tag: w.me.tag });
+    await c.waitFor('offer');
+    c.send({ t: 'offer_response', accept: false });
+    await c1.waitFor('offer_cancelled');
+  }
+  c1.send({ t: 'challenge', tag: ws[4].me.tag });
+  const rl = await c1.waitFor('challenge_failed');
+  assert(rl.reason === 'rate_limited', 'more than 3 challenges a minute are refused');
+
+  c1.send({ t: 'challenge', tag: '0000' });
+  const un = await c1.waitFor('challenge_failed');
+  assert(un.reason === 'unavailable', 'unknown tag refused');
+
+  c5.send({ t: 'challenge', tag: ws[1].me.tag });
+  await c2.waitFor('offer');
+  c2.send({ t: 'offer_response', accept: true });
+  const [m5, m2] = await Promise.all([c5.waitFor('match_start'), c2.waitFor('match_start')]);
+  assert(m5.side !== m2.side && m5.opponent.tag === ws[1].me.tag, 'accepted challenge starts a match');
+
+  c3.send({ t: 'challenge', tag: ws[1].me.tag });
+  const busy = await c3.waitFor('challenge_failed');
+  assert(busy.reason === 'busy', 'players in a match cannot be challenged');
+  cs.forEach((c) => c.close());
+  await sleep(300);
 }
 
 // Pair two fresh token-carrying clients into a match.
@@ -253,8 +309,7 @@ async function reconnectTests() {
   red.send({ t: 'move', edge: { orientation: 'h', row: 0, col: 0 } });
   await Promise.all([x.waitFor('move_applied'), y.waitFor('move_applied')]);
 
-  x.close();
-  await x.closed;
+  x.close(); // the server notices the drop and holds the seat
   const away = await y.waitFor('opponent_away');
   assert(away.graceMs === 90000, 'opponent told the seat is held for 90s');
   y.send({ t: 'move', edge: { orientation: 'h', row: 5, col: 5 } });
@@ -265,7 +320,7 @@ async function reconnectTests() {
   await x2.opened;
   const w2 = await x2.waitFor('welcome');
   assert(w2.resumed === true, 'reconnect with same token is resumed');
-  assert(w2.name === wx.name, 'player keeps their name');
+  assert(w2.me.tag === wx.me.tag, 'player keeps their letter and tag');
   const ms2 = await x2.waitFor('match_start');
   assert(ms2.side === mx.side, 'player keeps their side');
   assert(ms2.state.turn === 1 && ms2.state.h[0] === 0, 'board progress preserved');

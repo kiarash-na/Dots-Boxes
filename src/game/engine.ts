@@ -11,6 +11,7 @@ export interface Player {
   initials: string;
   color: string;
   soft: string; // translucent fill for captured boxes
+  tag?: string; // online: random 4-digit tag shown under the initial
 }
 
 export const RED: Player = {

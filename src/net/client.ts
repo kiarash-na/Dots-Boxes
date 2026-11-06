@@ -37,12 +37,12 @@ export class OnlineClient {
   private messageHandlers = new Set<(msg: ServerMessage) => void>();
   private statusHandlers = new Set<(s: ConnectionStatus) => void>();
 
-  constructor(host?: string) {
+  constructor(initial: string, host?: string) {
     this.socket = new PartySocket({
       host: host ?? (import.meta.env.VITE_WS_HOST as string | undefined) ?? DEFAULT_HOST,
       party: 'lobby', // kebab-case of the Durable Object binding name
       room: 'global', // one global lobby: everyone sees everyone
-      query: { token: sessionToken() },
+      query: { token: sessionToken(), initial },
     });
     this.socket.addEventListener('open', () => this.emitStatus('open'));
     this.socket.addEventListener('close', (ev) => {
@@ -102,6 +102,9 @@ export class OnlineClient {
   }
   leaveMatch() {
     this.sendMsg({ t: 'leave_match' });
+  }
+  challenge(tag: string) {
+    this.sendMsg({ t: 'challenge', tag });
   }
 
   close() {

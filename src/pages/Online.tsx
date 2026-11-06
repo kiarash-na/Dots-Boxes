@@ -9,15 +9,18 @@ import LobbyPanel from '../components/online/LobbyPanel';
 import MatchOffer from '../components/online/MatchOffer';
 import OpponentAway from '../components/online/OpponentAway';
 import OpponentGone from '../components/online/OpponentGone';
+import InitialPicker from '../components/online/InitialPicker';
+import PlayerTag from '../components/online/PlayerTag';
 import TurnTimer from '../components/online/TurnTimer';
 import type { Difficulty } from '../game/bot';
-import { BLUE, RED, applyMove, makeInitials } from '../game/engine';
+import { BLUE, RED, applyMove } from '../game/engine';
 import type { GameState, Player, PlayerId } from '../game/engine';
 import { useBotGame } from '../hooks/useBotGame';
 import { OnlineClient } from '../net/client';
 import type { ConnectionStatus } from '../net/client';
 import { deserializeState } from '../shared/state';
-import type { LobbyPlayer } from '../shared/protocol';
+import { playerLabel } from '../shared/protocol';
+import type { LobbyPlayer, OfferKind, PublicPlayer } from '../shared/protocol';
 
 type RematchState = 'none' | 'sent' | 'received';
 
@@ -25,15 +28,29 @@ type RematchState = 'none' | 'sent' | 'received';
 interface EndedMatch {
   state: GameState;
   side: PlayerId;
-  opponentName: string;
+  opponent: PublicPlayer;
   reason: 'opponent_left' | 'opponent_disconnected';
 }
 
 const deadlineIn = (ms: number | null) => (ms === null ? null : Date.now() + ms);
 
-function seatPlayers(selfSide: PlayerId, selfName: string, oppName: string): [Player, Player] {
-  const mine = { name: selfName, initials: makeInitials(selfName) };
-  const theirs = { name: oppName, initials: makeInitials(oppName) };
+const INITIAL_KEY = 'dots-boxes:online-initial';
+
+function savedInitial(): string | null {
+  try {
+    const v = localStorage.getItem(INITIAL_KEY);
+    return v && /^[A-Z]$/.test(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+const asPlayer = (p: PublicPlayer) => ({ name: p.initial, initials: p.initial, tag: p.tag });
+const BOT = { name: 'Bot', initials: 'BO', tag: undefined };
+
+type Seat = { name: string; initials: string; tag: string | undefined };
+
+function seatPlayers(selfSide: PlayerId, mine: Seat, theirs: Seat): [Player, Player] {
   return [
     { ...RED, ...(selfSide === 0 ? mine : theirs) },
     { ...BLUE, ...(selfSide === 1 ? mine : theirs) },
@@ -44,16 +61,22 @@ export default function Online() {
   const navigate = useNavigate();
 
   const [connStatus, setConnStatus] = useState<ConnectionStatus>('connecting');
-  const [me, setMe] = useState<{ id: string; name: string } | null>(null);
+  const [initial, setInitial] = useState<string | null>(savedInitial);
+  const [me, setMe] = useState<({ id: string } & PublicPlayer) | null>(null);
   const [queued, setQueued] = useState(false);
   const [lobby, setLobby] = useState<LobbyPlayer[]>([]);
   const [queueInfo, setQueueInfo] = useState<{ position: number | null; size: number }>({
     position: null,
     size: 0,
   });
-  const [offer, setOffer] = useState<{ opponentName: string; expiresInMs: number } | null>(null);
+  const [offer, setOffer] = useState<{
+    opponent: PublicPlayer;
+    expiresInMs: number;
+    kind: OfferKind;
+    fromMe: boolean;
+  } | null>(null);
   const [offerPending, setOfferPending] = useState(false);
-  const [match, setMatch] = useState<{ side: PlayerId; opponentName: string } | null>(null);
+  const [match, setMatch] = useState<{ side: PlayerId; opponent: PublicPlayer } | null>(null);
   const [game, setGame] = useState<GameState | null>(null);
   const [rematch, setRematch] = useState<RematchState>('none');
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
@@ -66,14 +89,16 @@ export default function Online() {
 
   const clientRef = useRef<OnlineClient | null>(null);
   const gameRef = useRef<GameState | null>(null);
-  const matchRef = useRef<{ side: PlayerId; opponentName: string } | null>(null);
+  const matchRef = useRef<{ side: PlayerId; opponent: PublicPlayer } | null>(null);
+  const offerRef = useRef<typeof offer>(null);
   const offlineRef = useRef(false); // choosing after a lost opponent, or playing the bot
   const resumingRef = useRef(false);
   useEffect(() => {
     gameRef.current = game;
     matchRef.current = match;
+    offerRef.current = offer;
     offlineRef.current = ended !== null || robot;
-  }, [game, match, ended, robot]);
+  }, [game, match, offer, ended, robot]);
 
   const clearMatch = useCallback(() => {
     setMatch(null);
@@ -85,14 +110,15 @@ export default function Online() {
 
   // ── connection lifecycle ─────────────────────────────────────────────────
   useEffect(() => {
-    const client = new OnlineClient();
+    if (!initial) return; // pick a letter first
+    const client = new OnlineClient(initial);
     clientRef.current = client;
     const offStatus = client.onStatus(setConnStatus);
 
     const offMessage = client.onMessage((msg) => {
       switch (msg.t) {
         case 'welcome': {
-          setMe({ id: msg.id, name: msg.name });
+          setMe({ id: msg.id, ...msg.me });
           if (msg.resumed) {
             // Our held seat was restored; match_start with the live board follows.
             resumingRef.current = true;
@@ -118,19 +144,50 @@ export default function Online() {
           setQueueInfo({ position: msg.position, size: msg.size });
           break;
         case 'offer':
-          setOffer({ opponentName: msg.opponentName, expiresInMs: msg.expiresInMs });
-          setOfferPending(false);
+          setOffer({
+            opponent: msg.opponent,
+            expiresInMs: msg.expiresInMs,
+            kind: msg.kind,
+            fromMe: msg.fromMe,
+          });
+          setOfferPending(msg.fromMe);
           break;
         case 'offer_pending':
           setOfferPending(true);
           break;
-        case 'offer_cancelled':
+        case 'offer_cancelled': {
+          const o = offerRef.current;
           setOffer(null);
           setOfferPending(false);
+          if (o?.kind === 'challenge') {
+            const who = playerLabel(o.opponent);
+            toast(
+              o.fromMe
+                ? msg.reason === 'declined'
+                  ? `${who} declined your challenge.`
+                  : `${who} didn't answer your challenge.`
+                : msg.reason === 'declined'
+                  ? `${who} withdrew the challenge.`
+                  : 'Challenge expired.'
+            );
+            break;
+          }
           toast(
             msg.reason === 'declined'
               ? 'Opponent passed — you keep your spot at the front of the line.'
               : 'Offer expired — you keep your spot at the front of the line.'
+          );
+          break;
+        }
+        case 'challenge_failed':
+          toast.error(
+            msg.reason === 'rate_limited'
+              ? 'Too many match requests — wait a minute before sending more.'
+              : msg.reason === 'cooldown'
+                ? 'You just asked this player — give them a moment before asking again.'
+                : msg.reason === 'busy'
+                  ? 'That player is busy right now.'
+                  : 'That player is no longer online.'
           );
           break;
         case 'match_start': {
@@ -143,10 +200,10 @@ export default function Online() {
             setRobot(false);
             setRematch('none');
             setOpponentAway(null);
-            setMatch({ side: msg.side, opponentName: msg.opponentName });
+            setMatch({ side: msg.side, opponent: msg.opponent });
             setGame(state);
             setTurnDeadline(deadlineIn(msg.turnMs));
-            if (!resumingRef.current) toast.success(`Matched with ${msg.opponentName} — game on!`);
+            if (!resumingRef.current) toast.success(`Matched with ${playerLabel(msg.opponent)} — game on!`);
             resumingRef.current = false;
           } catch {
             client.requestSync();
@@ -192,7 +249,7 @@ export default function Online() {
           break;
         case 'rematch_requested':
           setRematch('received');
-          toast(`${msg.byName} wants a rematch`);
+          toast(`${playerLabel(msg.by)} wants a rematch`);
           break;
         case 'match_ended': {
           const g = gameRef.current;
@@ -201,7 +258,7 @@ export default function Online() {
           if (g && m) {
             // Let the player choose: close, find another player, or play on vs the bot.
             setQueued(false);
-            setEnded({ state: g, side: m.side, opponentName: m.opponentName, reason: msg.reason });
+            setEnded({ state: g, side: m.side, opponent: m.opponent, reason: msg.reason });
             break;
           }
           bot.reset();
@@ -221,7 +278,7 @@ export default function Online() {
       clientRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initial]);
 
   // ── actions ──────────────────────────────────────────────────────────────
 
@@ -285,6 +342,30 @@ export default function Online() {
     setRobot(true);
   }, [bot, ended]);
 
+  const challengePlayer = useCallback((tag: string) => {
+    clientRef.current?.challenge(tag);
+  }, []);
+
+  const pickInitial = useCallback((letter: string) => {
+    try {
+      localStorage.setItem(INITIAL_KEY, letter);
+    } catch {
+      // storage blocked — the letter just isn't remembered
+    }
+    setInitial(letter);
+  }, []);
+
+  const changeInitial = useCallback(() => {
+    clientRef.current?.dequeue();
+    clearMatch();
+    setOffer(null);
+    setQueued(false);
+    setMe(null);
+    setLobby([]);
+    setConnStatus('connecting');
+    setInitial(null);
+  }, [clearMatch]);
+
   const leaveQueue = useCallback(() => {
     clientRef.current?.dequeue();
     setQueued(false);
@@ -300,13 +381,11 @@ export default function Online() {
   // ── derived view state ───────────────────────────────────────────────────
 
   const players: [Player, Player] = useMemo(() => {
-    if (match && me) return seatPlayers(match.side, me.name, match.opponentName);
-    if (ended && me) return seatPlayers(ended.side, me.name, ended.opponentName);
-    if (robot) return seatPlayers((1 - bot.botSide) as PlayerId, me?.name ?? 'You', 'Bot');
-    return [
-      { ...RED, name: me?.name ?? 'You', initials: makeInitials(me?.name ?? 'You') },
-      { ...BLUE, name: 'Bot', initials: 'BO' },
-    ];
+    const self: Seat = me ? asPlayer(me) : { name: 'You', initials: 'YO', tag: undefined };
+    if (match) return seatPlayers(match.side, self, asPlayer(match.opponent));
+    if (ended) return seatPlayers(ended.side, self, asPlayer(ended.opponent));
+    if (robot) return seatPlayers((1 - bot.botSide) as PlayerId, self, BOT);
+    return seatPlayers(0, self, BOT);
   }, [match, me, ended, robot, bot.botSide]);
 
   const inMatch = match !== null && game !== null;
@@ -329,9 +408,14 @@ export default function Online() {
           </h1>
           <div className="flex items-center gap-2">
             {me && (
-              <span className="hidden border border-[#E4E7EE] px-2.5 py-1 text-[12px] font-bold text-[#10131A] sm:inline-block">
-                {me.name}
-              </span>
+              <button
+                onClick={changeInitial}
+                disabled={match !== null}
+                title={match ? 'You are you' : 'Change your letter'}
+                className="border border-[#E4E7EE] px-2.5 py-1 text-[14px] text-[#10131A] transition-colors enabled:hover:border-[#10131A] disabled:cursor-default"
+              >
+                <PlayerTag player={me} />
+              </button>
             )}
             <span
               title={connStatus === 'open' ? 'Connected' : 'Connection lost — reconnecting…'}
@@ -342,7 +426,7 @@ export default function Online() {
           </div>
         </header>
 
-        {connStatus !== 'open' && (
+        {initial && connStatus !== 'open' && (
           <div className="mb-4 border border-[#FFD6D6] bg-[#FFF5F5] px-4 py-2.5 text-[13px] font-semibold text-[#B91C1C]">
             {connStatus === 'replaced'
               ? 'This online session was opened in another tab — continue playing there.'
@@ -352,175 +436,182 @@ export default function Online() {
           </div>
         )}
 
-        <div className="grid flex-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
-          <div className="mx-auto w-full max-w-[640px]">
-            {inMatch ? (
-              <>
-                <Scoreboard
-                  state={game}
-                  players={players}
-                  onNewGame={leavePage}
-                  selfSide={match.side}
-                  newGameLabel="Leave match"
-                  newGameConfirmTitle="Leave this match?"
-                  newGameConfirmDescription={`${match.opponentName} will be notified and the match will end.`}
-                  newGameConfirmAction="Yes, leave match"
-                />
-                {opponentAway !== null ? (
-                  <OpponentAway opponentName={match.opponentName} deadline={opponentAway} />
-                ) : (
-                  !game.over &&
-                  turnDeadline !== null && (
-                    <TurnTimer
-                      deadline={turnDeadline}
-                      mine={game.current === match.side}
-                      color={players[game.current].color}
+        {!initial ? (
+          <InitialPicker initial={savedInitial()} onPick={pickInitial} />
+        ) : (
+          <div className="grid flex-1 items-start gap-6 lg:grid-cols-[minmax(0,1fr)_300px]">
+            <div className="mx-auto w-full max-w-[640px]">
+              {inMatch ? (
+                <>
+                  <Scoreboard
+                    state={game}
+                    players={players}
+                    onNewGame={leavePage}
+                    selfSide={match.side}
+                    newGameLabel="Leave match"
+                    newGameConfirmTitle="Leave this match?"
+                    newGameConfirmDescription={`${playerLabel(match.opponent)} will be notified and the match will end.`}
+                    newGameConfirmAction="Yes, leave match"
+                  />
+                  {opponentAway !== null ? (
+                    <OpponentAway opponentName={playerLabel(match.opponent)} deadline={opponentAway} />
+                  ) : (
+                    !game.over &&
+                    turnDeadline !== null && (
+                      <TurnTimer
+                        deadline={turnDeadline}
+                        mine={game.current === match.side}
+                        color={players[game.current].color}
+                      />
+                    )
+                  )}
+                  <div className="relative mt-6">
+                    <Board
+                      state={game}
+                      players={players}
+                      onMove={onlineMove}
+                      locked={
+                        game.over ||
+                        game.current !== match.side ||
+                        opponentAway !== null ||
+                        connStatus !== 'open'
+                      }
                     />
-                  )
-                )}
-                <div className="relative mt-6">
-                  <Board
-                    state={game}
+                    <GameOver
+                      state={game}
+                      players={players}
+                      onRematch={requestRematch}
+                      onNewPlayers={findNewMatch}
+                      rematchLabel={
+                        rematch === 'sent'
+                          ? 'Waiting for opponent…'
+                          : rematch === 'received'
+                            ? 'Accept rematch'
+                            : 'Rematch'
+                      }
+                      rematchDisabled={rematch === 'sent'}
+                      secondaryLabel="Find new match"
+                    />
+                  </div>
+                </>
+              ) : ended ? (
+                <>
+                  <Scoreboard
+                    state={ended.state}
                     players={players}
-                    onMove={onlineMove}
-                    locked={
-                      game.over ||
-                      game.current !== match.side ||
-                      opponentAway !== null ||
-                      connStatus !== 'open'
-                    }
+                    onNewGame={leavePage}
+                    selfSide={ended.side}
+                    newGameLabel="Leave"
+                    newGameConfirmTitle="Leave online play?"
+                    newGameConfirmDescription="You'll return to the start screen."
+                    newGameConfirmAction="Yes, leave"
                   />
-                  <GameOver
-                    state={game}
-                    players={players}
-                    onRematch={requestRematch}
-                    onNewPlayers={findNewMatch}
-                    rematchLabel={
-                      rematch === 'sent'
-                        ? 'Waiting for opponent…'
-                        : rematch === 'received'
-                          ? 'Accept rematch'
-                          : 'Rematch'
-                    }
-                    rematchDisabled={rematch === 'sent'}
-                    secondaryLabel="Find new match"
-                  />
-                </div>
-              </>
-            ) : ended ? (
-              <>
-                <Scoreboard
-                  state={ended.state}
-                  players={players}
-                  onNewGame={leavePage}
-                  selfSide={ended.side}
-                  newGameLabel="Leave"
-                  newGameConfirmTitle="Leave online play?"
-                  newGameConfirmDescription="You'll return to the start screen."
-                  newGameConfirmAction="Yes, leave"
-                />
-                <div className="relative mt-6">
-                  <Board state={ended.state} players={players} onMove={() => {}} locked />
-                </div>
-              </>
-            ) : robot ? (
-              <>
-                <Scoreboard
-                  state={bot.state}
-                  players={players}
-                  onNewGame={findAnotherPlayer}
-                  botDifficulty={difficulty}
-                  onChangeDifficulty={setDifficulty}
-                  botSide={bot.botSide}
-                  selfSide={(1 - bot.botSide) as PlayerId}
-                  newGameLabel="Find a player"
-                  newGameConfirmTitle="Find a real player?"
-                  newGameConfirmDescription="This bot game ends and you join the queue (you can play a fresh bot game while you wait)."
-                  newGameConfirmAction="Yes, find a player"
-                />
-                <div className="relative mt-6">
-                  <Board state={bot.state} players={players} onMove={bot.move} locked={bot.botTurn} />
-                  <GameOver
+                  <div className="relative mt-6">
+                    <Board state={ended.state} players={players} onMove={() => {}} locked />
+                  </div>
+                </>
+              ) : robot ? (
+                <>
+                  <Scoreboard
                     state={bot.state}
                     players={players}
-                    onRematch={bot.reset}
-                    onNewPlayers={findAnotherPlayer}
-                    rematchLabel="Play the bot again"
-                    secondaryLabel="Find a real player"
+                    onNewGame={findAnotherPlayer}
+                    botDifficulty={difficulty}
+                    onChangeDifficulty={setDifficulty}
+                    botSide={bot.botSide}
+                    selfSide={(1 - bot.botSide) as PlayerId}
+                    newGameLabel="Find a player"
+                    newGameConfirmTitle="Find a real player?"
+                    newGameConfirmDescription="This bot game ends and you join the queue (you can play a fresh bot game while you wait)."
+                    newGameConfirmAction="Yes, find a player"
                   />
-                </div>
-              </>
-            ) : queued ? (
-              <>
-                <div className="mb-4 flex items-center gap-2.5 border border-[#F5E3C0] bg-[#FFF9F0] px-4 py-2.5 text-[13px] font-semibold text-[#8A6100]">
-                  <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-[#F5A623]" />
-                  You're playing the bot while you wait — we'll notify you the moment a real
-                  player is matched with you.
-                </div>
-                <Scoreboard
-                  state={bot.state}
-                  players={players}
-                  onNewGame={leaveQueue}
-                  botDifficulty={difficulty}
-                  onChangeDifficulty={setDifficulty}
-                  selfSide={0}
-                  newGameLabel="Leave queue"
-                  newGameConfirmTitle="Leave the queue?"
-                  newGameConfirmDescription="You'll stop waiting for an opponent and can rejoin the line anytime."
-                  newGameConfirmAction="Yes, leave queue"
-                />
-                <div className="relative mt-6">
-                  <Board state={bot.state} players={players} onMove={bot.move} locked={bot.botTurn} />
-                  <GameOver
+                  <div className="relative mt-6">
+                    <Board state={bot.state} players={players} onMove={bot.move} locked={bot.botTurn} />
+                    <GameOver
+                      state={bot.state}
+                      players={players}
+                      onRematch={bot.reset}
+                      onNewPlayers={findAnotherPlayer}
+                      rematchLabel="Play the bot again"
+                      secondaryLabel="Find a real player"
+                    />
+                  </div>
+                </>
+              ) : queued ? (
+                <>
+                  <div className="mb-4 flex items-center gap-2.5 border border-[#F5E3C0] bg-[#FFF9F0] px-4 py-2.5 text-[13px] font-semibold text-[#8A6100]">
+                    <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-[#F5A623]" />
+                    You're playing the bot while you wait — we'll notify you the moment a real
+                    player is matched with you.
+                  </div>
+                  <Scoreboard
                     state={bot.state}
                     players={players}
-                    onRematch={bot.reset}
-                    onNewPlayers={leaveQueue}
-                    rematchLabel="Play again"
-                    secondaryLabel="Leave queue"
+                    onNewGame={leaveQueue}
+                    botDifficulty={difficulty}
+                    onChangeDifficulty={setDifficulty}
+                    selfSide={0}
+                    newGameLabel="Leave queue"
+                    newGameConfirmTitle="Leave the queue?"
+                    newGameConfirmDescription="You'll stop waiting for an opponent and can rejoin the line anytime."
+                    newGameConfirmAction="Yes, leave queue"
                   />
+                  <div className="relative mt-6">
+                    <Board state={bot.state} players={players} onMove={bot.move} locked={bot.botTurn} />
+                    <GameOver
+                      state={bot.state}
+                      players={players}
+                      onRematch={bot.reset}
+                      onNewPlayers={leaveQueue}
+                      rematchLabel="Play again"
+                      secondaryLabel="Leave queue"
+                    />
+                  </div>
+                </>
+              ) : (
+                <div className="flex min-h-[320px] flex-col items-center justify-center border border-dashed border-[#E4E7EE] px-6 py-16 text-center">
+                  <div className="flex items-center gap-1.5">
+                    <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#FF1E1E]" />
+                    <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#004EFF]" />
+                  </div>
+                  <h2 className="mt-4 text-[24px] font-extrabold tracking-[-0.03em] text-[#10131A]">
+                    {connStatus === 'open' ? 'Ready when you are' : 'Finding the lobby…'}
+                  </h2>
+                  <p className="mt-2 max-w-xs text-[14px] leading-relaxed text-[#8A91A1]">
+                    Join the queue and play the bot while you wait. First in line gets matched first.
+                  </p>
+                  <button
+                    onClick={joinQueue}
+                    disabled={connStatus !== 'open'}
+                    className="mt-8 bg-[#10131A] px-8 py-3.5 text-[15px] font-bold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
+                  >
+                    Find a match
+                  </button>
                 </div>
-              </>
-            ) : (
-              <div className="flex min-h-[320px] flex-col items-center justify-center border border-dashed border-[#E4E7EE] px-6 py-16 text-center">
-                <div className="flex items-center gap-1.5">
-                  <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#FF1E1E]" />
-                  <span className="inline-block h-2.5 w-2.5 rounded-full bg-[#004EFF]" />
-                </div>
-                <h2 className="mt-4 text-[24px] font-extrabold tracking-[-0.03em] text-[#10131A]">
-                  {connStatus === 'open' ? 'Ready when you are' : 'Finding the lobby…'}
-                </h2>
-                <p className="mt-2 max-w-xs text-[14px] leading-relaxed text-[#8A91A1]">
-                  Join the queue and play the bot while you wait. First in line gets matched first.
-                </p>
-                <button
-                  onClick={joinQueue}
-                  disabled={connStatus !== 'open'}
-                  className="mt-8 bg-[#10131A] px-8 py-3.5 text-[15px] font-bold text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-30"
-                >
-                  Find a match
-                </button>
-              </div>
-            )}
+              )}
 
-            <footer className="pt-4 text-center text-[11px] text-[#B8BECC]">
-              Click between two adjacent dots to draw a line · close a square to claim it and go
-              again
-            </footer>
+              <footer className="pt-4 text-center text-[11px] text-[#B8BECC]">
+                Click between two adjacent dots to draw a line · close a square to claim it and go
+                again
+              </footer>
+            </div>
+
+            <LobbyPanel
+              players={lobby}
+              selfTag={me?.tag ?? null}
+              queuePosition={queued ? queueInfo.position : null}
+              queueSize={queueInfo.size}
+              onChallenge={
+                connStatus === 'open' && !inMatch && !offer && !ended ? challengePlayer : undefined
+              }
+            />
           </div>
-
-          <LobbyPanel
-            players={lobby}
-            selfName={me?.name ?? null}
-            queuePosition={queued ? queueInfo.position : null}
-            queueSize={queueInfo.size}
-          />
-        </div>
+        )}
       </div>
 
       {ended && (
         <OpponentGone
-          opponentName={ended.opponentName}
+          opponentName={playerLabel(ended.opponent)}
           reason={ended.reason}
           gameOver={ended.state.over}
           onClose={leavePage}
@@ -531,8 +622,10 @@ export default function Online() {
 
       {offer && (
         <MatchOffer
-          opponentName={offer.opponentName}
+          opponent={offer.opponent}
           expiresInMs={offer.expiresInMs}
+          kind={offer.kind}
+          fromMe={offer.fromMe}
           pending={offerPending}
           onAccept={acceptOffer}
           onDecline={declineOffer}

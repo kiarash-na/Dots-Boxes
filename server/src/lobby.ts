@@ -10,6 +10,10 @@
 // new connection with the same token takes the seat back and the game simply
 // continues. Turns are limited to TURN_MS — on timeout the server plays a
 // random legal move for the idle player.
+//
+// Identity: players pick a single letter; the server adds a random 4-digit
+// tag. Besides the FIFO queue, a player may challenge a specific lobby player
+// by tag — rate limited per sender and per target.
 
 import { Server } from 'partyserver';
 import type { Connection, ConnectionContext } from 'partyserver';
@@ -17,10 +21,16 @@ import { chooseMove } from '../../src/game/bot';
 import { applyMove, newGame } from '../../src/game/engine';
 import type { Edge, GameState, PlayerId } from '../../src/game/engine';
 import { clientMessageSchema } from './schema';
-import { RECONNECT_GRACE_MS, TURN_MS } from '../../src/shared/protocol';
-import type { LobbyPlayer, ServerMessage } from '../../src/shared/protocol';
+import {
+  CHALLENGE_COOLDOWN_MS,
+  CHALLENGE_MAX,
+  CHALLENGE_WINDOW_MS,
+  RECONNECT_GRACE_MS,
+  TURN_MS,
+} from '../../src/shared/protocol';
+import type { LobbyPlayer, OfferKind, PublicPlayer, ServerMessage } from '../../src/shared/protocol';
 import { serializeState } from '../../src/shared/state';
-import { randomName } from './names';
+import { parseInitial, randomTag } from './names';
 
 const OFFER_TTL_MS = 15_000; // match offer expires if not answered
 const OFFER_COOLDOWN_MS = 20_000; // declining/ignoring pauses your next offer
@@ -35,7 +45,7 @@ type ClientStatus = 'idle' | 'queued' | 'offered' | 'playing';
 interface ClientInfo {
   id: string;
   token: string | null; // reconnect secret from the URL (null: no resume)
-  name: string;
+  me: PublicPlayer;
   status: ClientStatus;
   cooldownUntil: number; // no offers before this time (decline/timeout penalty)
   matchId: string | null;
@@ -43,11 +53,15 @@ interface ClientInfo {
   windowStart: number; // rate-limit window
   windowCount: number;
   strikes: number;
+  challengesSent: number[]; // timestamps, for the per-sender challenge budget
+  challengeBlocks: Map<string, number>; // target tag → no re-challenge before
 }
 
 interface PendingOffer {
   id: string;
-  players: [string, string];
+  kind: OfferKind;
+  players: [string, string]; // for a challenge, players[0] is the challenger
+  prevStatus: [ClientStatus, ClientStatus]; // restored when a challenge falls through
   accepted: Set<string>;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -55,7 +69,7 @@ interface PendingOffer {
 interface Seat {
   id: string; // connection id (stale while the player is away)
   token: string | null;
-  name: string;
+  me: PublicPlayer;
   away: ReturnType<typeof setTimeout> | null; // grace timer while disconnected
 }
 
@@ -85,7 +99,7 @@ export class Lobby extends Server {
 
   private broadcastLobby() {
     const players: LobbyPlayer[] = [...this.clients.values()].map((c) => ({
-      name: c.name,
+      ...c.me,
       status:
         c.status === 'playing' ? 'playing' : c.status === 'idle' ? 'idle' : 'queued',
     }));
@@ -132,13 +146,24 @@ export class Lobby extends Server {
     }
 
     const seat = token ? this.findAwaySeat(token) : null;
-    const taken = new Set([...this.clients.values()].map((c) => c.name));
-    for (const m of this.matches.values()) for (const s of m.seats) if (s.away) taken.add(s.name);
-    const name = seat ? seat.match.seats[seat.side].name : randomName(taken);
+    let me: PublicPlayer;
+    if (seat) {
+      me = seat.match.seats[seat.side].me; // same identity as before the drop
+    } else {
+      const taken = new Set([...this.clients.values()].map((c) => c.me.tag));
+      for (const m of this.matches.values()) for (const s of m.seats) if (s.away) taken.add(s.me.tag);
+      let initial: string | null = null;
+      try {
+        initial = new URL(ctx.request.url).searchParams.get('initial');
+      } catch {
+        // fall through to the placeholder
+      }
+      me = { initial: parseInitial(initial), tag: randomTag(taken) };
+    }
     this.clients.set(conn.id, {
       id: conn.id,
       token,
-      name,
+      me,
       status: 'idle',
       cooldownUntil: 0,
       matchId: null,
@@ -146,9 +171,11 @@ export class Lobby extends Server {
       windowStart: Date.now(),
       windowCount: 0,
       strikes: 0,
+      challengesSent: [],
+      challengeBlocks: new Map(),
     });
     conn.send(
-      JSON.stringify({ t: 'welcome', id: conn.id, name, resumed: !!seat } satisfies ServerMessage)
+      JSON.stringify({ t: 'welcome', id: conn.id, me, resumed: !!seat } satisfies ServerMessage)
     );
     if (seat) this.resumeSeat(conn.id, seat.match, seat.side);
     this.broadcastLobby();
@@ -222,6 +249,8 @@ export class Lobby extends Server {
       case 'leave_match':
         if (c.matchId) this.endMatch(c.matchId, c.id, 'opponent_left');
         return;
+      case 'challenge':
+        return this.challenge(c, msg.tag);
     }
   }
 
@@ -273,19 +302,48 @@ export class Lobby extends Server {
 
   // ── offers ───────────────────────────────────────────────────────────────
 
-  private createOffer(a: string, b: string) {
+  private createOffer(a: string, b: string, kind: OfferKind = 'queue') {
     const ca = this.clients.get(a);
     const cb = this.clients.get(b);
     if (!ca || !cb) return;
     const id = crypto.randomUUID();
+    const prevStatus: [ClientStatus, ClientStatus] = [ca.status, cb.status];
     ca.status = 'offered';
     ca.offerId = id;
     cb.status = 'offered';
     cb.offerId = id;
     const timer = setTimeout(() => this.resolveOffer(id, null, false), OFFER_TTL_MS);
-    this.offers.set(id, { id, players: [a, b], accepted: new Set(), timer });
-    this.sendTo(a, { t: 'offer', opponentName: cb.name, expiresInMs: OFFER_TTL_MS });
-    this.sendTo(b, { t: 'offer', opponentName: ca.name, expiresInMs: OFFER_TTL_MS });
+    // A challenger has implicitly accepted their own request.
+    const accepted = new Set<string>(kind === 'challenge' ? [a] : []);
+    this.offers.set(id, { id, kind, players: [a, b], prevStatus, accepted, timer });
+    const base = { t: 'offer', expiresInMs: OFFER_TTL_MS, kind } as const;
+    this.sendTo(a, { ...base, opponent: cb.me, fromMe: kind === 'challenge' });
+    this.sendTo(b, { ...base, opponent: ca.me, fromMe: false });
+  }
+
+  /** Direct match request to the lobby player with `tag`. */
+  private challenge(c: ClientInfo, tag: string) {
+    const now = Date.now();
+    const target = [...this.clients.values()].find((x) => x.me.tag === tag);
+    if (!target || target.id === c.id) {
+      return this.sendTo(c.id, { t: 'challenge_failed', reason: 'unavailable' });
+    }
+    if (c.status === 'playing' || c.status === 'offered') {
+      return this.sendTo(c.id, { t: 'challenge_failed', reason: 'busy' });
+    }
+    if (target.status === 'playing' || target.status === 'offered') {
+      return this.sendTo(c.id, { t: 'challenge_failed', reason: 'busy' });
+    }
+    if ((c.challengeBlocks.get(tag) ?? 0) > now) {
+      return this.sendTo(c.id, { t: 'challenge_failed', reason: 'cooldown' });
+    }
+    c.challengesSent = c.challengesSent.filter((t) => now - t < CHALLENGE_WINDOW_MS);
+    if (c.challengesSent.length >= CHALLENGE_MAX) {
+      return this.sendTo(c.id, { t: 'challenge_failed', reason: 'rate_limited' });
+    }
+    c.challengesSent.push(now);
+    this.createOffer(c.id, target.id, 'challenge');
+    this.broadcastLobby();
   }
 
   private answerOffer(c: ClientInfo, accept: boolean) {
@@ -311,6 +369,8 @@ export class Lobby extends Server {
     if (!offer) return;
     clearTimeout(offer.timer);
     this.offers.delete(offerId);
+
+    if (offer.kind === 'challenge') return this.resolveChallenge(offer, declinerId);
 
     for (const id of offer.players) {
       const c = this.clients.get(id);
@@ -342,6 +402,30 @@ export class Lobby extends Server {
     this.matchmake();
   }
 
+  /**
+   * A challenge fell through: nobody is penalised in the queue — both go back
+   * to what they were doing. The challenger can't re-ask that player for a bit.
+   */
+  private resolveChallenge(offer: PendingOffer, declinerId: string | null) {
+    const [challengerId, targetId] = offer.players;
+    offer.players.forEach((id, i) => {
+      const c = this.clients.get(id);
+      if (!c) return;
+      c.offerId = null;
+      c.status = offer.prevStatus[i] === 'queued' && this.queue.includes(id) ? 'queued' : 'idle';
+      if (id === declinerId) return; // they chose this — their client already knows
+      this.sendTo(id, { t: 'offer_cancelled', reason: declinerId === null ? 'expired' : 'declined' });
+    });
+    const challenger = this.clients.get(challengerId);
+    const target = this.clients.get(targetId);
+    if (challenger && target && declinerId !== challengerId) {
+      challenger.challengeBlocks.set(target.me.tag, Date.now() + CHALLENGE_COOLDOWN_MS);
+    }
+    this.broadcastLobby();
+    this.sendQueuePositions();
+    this.matchmake();
+  }
+
   // ── matches ──────────────────────────────────────────────────────────────
 
   private startMatch(offer: PendingOffer) {
@@ -355,8 +439,8 @@ export class Lobby extends Server {
     const match: Match = {
       id: crypto.randomUUID(),
       seats: [
-        { id: a, token: ca.token, name: ca.name, away: null },
-        { id: b, token: cb.token, name: cb.name, away: null },
+        { id: a, token: ca.token, me: ca.me, away: null },
+        { id: b, token: cb.token, me: cb.me, away: null },
       ],
       state: newGame(),
       rematchVotes: new Set(),
@@ -368,13 +452,13 @@ export class Lobby extends Server {
     this.removeFromQueue(b);
 
     this.startTurnTimer(match);
-    this.seat(a, match, cb.name, 0);
-    this.seat(b, match, ca.name, 1);
+    this.seat(a, match, cb.me, 0);
+    this.seat(b, match, ca.me, 1);
     this.broadcastLobby();
     this.sendQueuePositions();
   }
 
-  private seat(id: string, match: Match, opponentName: string, side: PlayerId) {
+  private seat(id: string, match: Match, opponent: PublicPlayer, side: PlayerId) {
     const c = this.clients.get(id);
     if (!c) return;
     c.status = 'playing';
@@ -383,7 +467,7 @@ export class Lobby extends Server {
     this.sendTo(id, {
       t: 'match_start',
       side,
-      opponentName,
+      opponent,
       state: serializeState(match.state),
       turnMs: this.turnMsLeft(match),
     });
@@ -466,9 +550,9 @@ export class Lobby extends Server {
     }
     const other = m.seats[1 - side];
     this.startTurnTimer(m);
-    this.seat(id, m, other.name, side);
+    this.seat(id, m, other.me, side);
     if (m.rematchVotes.has(voteKey(other))) {
-      this.sendTo(id, { t: 'rematch_requested', byName: other.name });
+      this.sendTo(id, { t: 'rematch_requested', by: other.me });
     }
     this.sendTo(other.id, { t: 'opponent_back', turnMs: this.turnMsLeft(m) });
   }
@@ -524,7 +608,7 @@ export class Lobby extends Server {
     m.rematchVotes.add(voteKey(m.seats[side]));
     const other = m.seats[1 - side];
     if (m.rematchVotes.size < 2) {
-      if (!other.away) this.sendTo(other.id, { t: 'rematch_requested', byName: c.name });
+      if (!other.away) this.sendTo(other.id, { t: 'rematch_requested', by: c.me });
       return;
     }
     // Both agreed: fresh board, colors swapped.
@@ -532,7 +616,7 @@ export class Lobby extends Server {
     m.rematchVotes.clear();
     m.seats.reverse();
     this.startTurnTimer(m);
-    m.seats.forEach((s, i) => this.seat(s.id, m, m.seats[1 - i].name, i as PlayerId));
+    m.seats.forEach((s, i) => this.seat(s.id, m, m.seats[1 - i].me, i as PlayerId));
   }
 
   /** A match is torn down; the remaining player is told why and goes idle. */

@@ -39,6 +39,9 @@ export default function GameOver({
             <p className="mt-2 text-[34px] font-extrabold leading-tight tracking-[-0.03em] text-[#10131A]">
               {winner.name}
             </p>
+            {winner.tag && (
+              <p className="text-[12px] font-semibold tabular-nums text-[#8A91A1]">#{winner.tag}</p>
+            )}
             <p className="mt-3 text-[15px] tabular-nums text-[#5A6070]">
               <span className="font-bold" style={{ color: players[0].color }}>{a}</span>
               {' – '}

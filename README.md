@@ -9,8 +9,10 @@ boxes wins.
 - Classic rule: closing a box grants an extra turn
 - Local two-player: enter two names, share one screen
 - Bot opponent with three difficulties
-- Online: no accounts — random names, a live lobby, first-come-first-served
-  queue, and a bot game to keep you busy while you wait
+- Online: no accounts — pick a single letter (plus a random 4-digit tag), a
+  live lobby, first-come-first-served queue or direct challenges, 30-second
+  turns, reconnect within 90 seconds to resume, and a bot game to keep you
+  busy while you wait
 
 ## Tech stack
 
@@ -56,17 +58,31 @@ Server (`cd server` first):
 | ------------------------ | ----------------------------------------------- |
 | `npm run dev`            | Local dev server (wrangler) on port 8787        |
 | `npm run typecheck`      | Type-check the server                           |
-| `node test/smoke.mjs`    | E2E test: two clients play a full match + abuse cases |
+| `node test/smoke.mjs`    | E2E test: full match, challenges, reconnects, turn timeout, abuse cases (`SMOKE_SLOW=1` also waits out the 90s grace period) |
 | `npm run deploy`         | Deploy to Cloudflare (needs `npx wrangler login`) |
 
 ## How online mode works
 
 One global lobby lives in a single Durable Object. The server is the **single
-authority**: it assigns random names, holds the FIFO queue, sends match
+authority**: it assigns random 4-digit tags, holds the FIFO queue, sends match
 offers (both players must accept within 15s; declining sends you to the back
 of the line with a short cooldown), and validates every move with the same
 `game/engine.ts` the client uses — clients request moves, the server accepts
 or rejects them. No client message is ever relayed verbatim to anyone.
+
+- **Identity:** each player picks one letter (A–Z); the server adds a random
+  4-digit tag (`K #4821`) so players with the same letter can be told apart.
+- **Direct challenges:** click *Challenge* next to any idle or queued player in
+  the lobby. Limited to 3 requests a minute, and you can't re-ask the same
+  player for 30s after they decline or ignore you. A declined challenge never
+  costs anyone their place in the queue.
+- **Turn clock:** each move has a 30-second limit; when it runs out the server
+  draws a random line for that player.
+- **Reconnects:** every tab sends a secret token with its connection. If a
+  player drops mid-match, their seat is held for 90 seconds (the clock pauses);
+  coming back in time — even after a page reload — restores the same board,
+  side and identity. After 90 seconds the remaining player chooses to close,
+  find another player, or continue the same game against the robot.
 
 Anti-abuse measures:
 
@@ -74,7 +90,8 @@ Anti-abuse measures:
 - zod schema validation of every incoming message; 8 malformed messages → kick
 - Rate limit: 100 messages / 10s per connection
 - Origin allowlist on the WebSocket handshake (`ALLOWED_ORIGINS`)
-- No logins, no chat, no free-text anywhere — random server-assigned names
+- No logins, no chat, no free-text anywhere — a single A–Z letter is the only input
+- Challenge rate limits (3/min per sender, 30s per-target cooldown)
 
 ## Project structure
 
@@ -100,7 +117,7 @@ src/
 server/
 ├── src/index.ts          Worker entry: origin allowlist, routing
 ├── src/lobby.ts          The Lobby Durable Object (presence, queue, matches)
-├── src/names.ts          Random name generator
+├── src/names.ts          Letter validation + random 4-digit tags
 ├── wrangler.jsonc        Cloudflare config
 └── test/smoke.mjs        E2E smoke test
 ```
