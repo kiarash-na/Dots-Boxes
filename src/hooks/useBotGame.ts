@@ -1,23 +1,37 @@
 // ─── Casual bot game while waiting in the online queue ─────────────────────
-// Human is always Red (side 0), the bot is Blue. Purely client-side — it is
-// discarded as soon as a human match starts.
+// By default the human is Red (side 0) and the bot Blue. `resume` lets the
+// bot take over an abandoned online game from its current position, on the
+// side the departed opponent played. Purely client-side.
 
 import { useCallback, useEffect, useState } from 'react';
 import { chooseMove } from '../game/bot';
 import type { Difficulty } from '../game/bot';
 import { applyMove, newGame } from '../game/engine';
-import type { Edge, GameState } from '../game/engine';
+import type { Edge, GameState, PlayerId } from '../game/engine';
 
 export function useBotGame(difficulty: Difficulty) {
   const [state, setState] = useState<GameState>(newGame);
+  const [botSide, setBotSide] = useState<PlayerId>(1);
 
-  const move = useCallback((e: Edge) => {
-    setState((s) => (s.current === 1 ? s : (applyMove(s, e)?.next ?? s)));
+  const move = useCallback(
+    (e: Edge) => {
+      setState((s) => (s.current === botSide ? s : (applyMove(s, e)?.next ?? s)));
+    },
+    [botSide]
+  );
+
+  const reset = useCallback(() => {
+    setBotSide(1);
+    setState(newGame());
   }, []);
 
-  const reset = useCallback(() => setState(newGame()), []);
+  /** Continue from `from` with the bot playing `side`. */
+  const resume = useCallback((from: GameState, side: PlayerId) => {
+    setBotSide(side);
+    setState(from.over ? newGame() : from);
+  }, []);
 
-  const botTurn = !state.over && state.current === 1;
+  const botTurn = !state.over && state.current === botSide;
 
   // One move per timer so capture chains play out visibly.
   useEffect(() => {
@@ -25,13 +39,15 @@ export function useBotGame(difficulty: Difficulty) {
     const t = setTimeout(
       () => {
         setState((s) =>
-          s.over || s.current !== 1 ? s : (applyMove(s, chooseMove(s, difficulty))?.next ?? s)
+          s.over || s.current !== botSide
+            ? s
+            : (applyMove(s, chooseMove(s, difficulty))?.next ?? s)
         );
       },
       450 + Math.random() * 300
     );
     return () => clearTimeout(t);
-  }, [botTurn, difficulty, state]);
+  }, [botTurn, botSide, difficulty, state]);
 
-  return { state, move, reset, botTurn };
+  return { state, move, reset, resume, botTurn, botSide };
 }

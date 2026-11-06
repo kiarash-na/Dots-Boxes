@@ -10,6 +10,8 @@ interface ScoreboardProps {
   onNewGame: () => void;
   botDifficulty?: Difficulty | null;
   onChangeDifficulty?: (d: Difficulty) => void;
+  /** Which side the bot plays (default Blue). */
+  botSide?: PlayerId;
   /** Online play: which side is the local player — turn label reads "your/their turn". */
   selfSide?: PlayerId | null;
   newGameLabel?: string;
@@ -24,6 +26,7 @@ export default function Scoreboard({
   onNewGame,
   botDifficulty = null,
   onChangeDifficulty,
+  botSide = 1,
   selfSide = null,
   newGameLabel = 'New game',
   newGameConfirmTitle = 'Start a new game?',
@@ -40,7 +43,7 @@ export default function Scoreboard({
         {[0, 1].map((i) => {
           const p = players[i];
           const active = !state.over && state.current === i;
-          const botThinking = active && botDifficulty != null && i === 1;
+          const botThinking = active && botDifficulty != null && i === botSide;
           return (
             <div key={p.color} className="flex-1">
               <div className="flex items-center gap-2">

@@ -2,7 +2,9 @@
 // in server/ first, then: `node test/smoke.mjs`
 // Exercises: welcome/names, lobby broadcast, FIFO queue, match offers,
 // authoritative moves, wrong-turn rejection, full game, rematch + side swap,
-// leaving, offer decline order, malformed-message kicks, origin allowlist.
+// leaving, offer decline order, malformed-message kicks, origin allowlist,
+// reconnect-and-resume within the grace period, tab takeover, turn timeout.
+// Set SMOKE_SLOW=1 to also wait out the 90s reconnect grace period.
 
 const URL = process.env.SMOKE_URL ?? 'ws://localhost:8787/parties/lobby/global';
 const ORIGIN = process.env.SMOKE_ORIGIN ?? 'http://localhost:3000';
@@ -19,11 +21,12 @@ function assert(cond, label) {
 }
 
 class TestClient {
-  constructor(tag, origin = ORIGIN) {
+  constructor(tag, origin = ORIGIN, token = null) {
     this.tag = tag;
     this.backlog = [];
     this.waiters = [];
-    this.ws = new WebSocket(URL, { headers: { Origin: origin } });
+    const url = token ? `${URL}?token=${token}` : URL;
+    this.ws = new WebSocket(url, { headers: { Origin: origin } });
     this.opened = new Promise((res, rej) => {
       this.ws.addEventListener('open', res, { once: true });
       this.ws.addEventListener('error', rej, { once: true });
@@ -216,8 +219,90 @@ async function main() {
 
   a.close();
   b.close();
+
+  await reconnectTests();
+
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
+}
+
+// Pair two fresh token-carrying clients into a match.
+async function tokenMatch(tagA, tagB) {
+  const tA = crypto.randomUUID();
+  const tB = crypto.randomUUID();
+  const x = new TestClient(tagA, ORIGIN, tA);
+  const y = new TestClient(tagB, ORIGIN, tB);
+  await Promise.all([x.opened, y.opened]);
+  const [wx, wy] = await Promise.all([x.waitFor('welcome'), y.waitFor('welcome')]);
+  x.send({ t: 'enqueue' });
+  y.send({ t: 'enqueue' });
+  await Promise.all([x.waitFor('offer'), y.waitFor('offer')]);
+  x.send({ t: 'offer_response', accept: true });
+  y.send({ t: 'offer_response', accept: true });
+  const [mx, my] = await Promise.all([x.waitFor('match_start'), y.waitFor('match_start')]);
+  return { x, y, tA, tB, wx, wy, mx, my };
+}
+
+async function reconnectTests() {
+  console.log('— reconnect within grace resumes the match —');
+  const { x, y, tA, wx, mx, my } = await tokenMatch('G', 'H');
+  assert(wx.resumed === false, 'fresh connection is not resumed');
+  assert(typeof mx.turnMs === 'number' && mx.turnMs > 25000, `turn clock started (${mx.turnMs}ms)`);
+  // Red (side 0) plays one line so there is progress to keep.
+  const red = mx.side === 0 ? x : y;
+  red.send({ t: 'move', edge: { orientation: 'h', row: 0, col: 0 } });
+  await Promise.all([x.waitFor('move_applied'), y.waitFor('move_applied')]);
+
+  x.close();
+  await x.closed;
+  const away = await y.waitFor('opponent_away');
+  assert(away.graceMs === 90000, 'opponent told the seat is held for 90s');
+  y.send({ t: 'move', edge: { orientation: 'h', row: 5, col: 5 } });
+  const paused = await y.waitFor('move_rejected');
+  assert(paused.reason === 'opponent_away', 'moves are paused while opponent is away');
+
+  const x2 = new TestClient('G2', ORIGIN, tA);
+  await x2.opened;
+  const w2 = await x2.waitFor('welcome');
+  assert(w2.resumed === true, 'reconnect with same token is resumed');
+  assert(w2.name === wx.name, 'player keeps their name');
+  const ms2 = await x2.waitFor('match_start');
+  assert(ms2.side === mx.side, 'player keeps their side');
+  assert(ms2.state.turn === 1 && ms2.state.h[0] === 0, 'board progress preserved');
+  const back = await y.waitFor('opponent_back');
+  assert(typeof back.turnMs === 'number', 'opponent told the player is back, clock resumed');
+  void my;
+
+  console.log('— a second tab with the same token takes over —');
+  const x3 = new TestClient('G3', ORIGIN, tA);
+  await x3.opened;
+  const w3 = await x3.waitFor('welcome');
+  const kicked = await x2.closed;
+  assert(kicked.code === 4409, `old connection closed with 4409 (got ${kicked.code})`);
+  assert(w3.resumed === true, 'new tab resumed the seat');
+  await x3.waitFor('match_start');
+
+  console.log('— turn timer plays a random move after 30s —');
+  // Board after one red line: it's Blue's turn. Nobody moves.
+  const auto = await y.waitFor('move_applied', 40000);
+  assert(auto.auto === true, 'server auto-played the timed-out turn');
+  assert(auto.turn === 2, 'auto move advanced the game');
+
+  if (process.env.SMOKE_SLOW) {
+    console.log('— no reconnect within 90s ends the match —');
+    x3.close();
+    await y.waitFor('opponent_away');
+    const gone = await y.waitFor('match_ended', 100000);
+    assert(gone.reason === 'opponent_disconnected', 'remaining player told after grace period');
+    const x4 = new TestClient('G4', ORIGIN, tA);
+    await x4.opened;
+    const w4 = await x4.waitFor('welcome');
+    assert(w4.resumed === false, 'late reconnect starts fresh');
+    x4.close();
+  } else {
+    x3.close();
+  }
+  y.close();
 }
 
 main().catch((err) => {

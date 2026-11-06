@@ -7,6 +7,9 @@ import GameOver from '../components/GameOver';
 import Scoreboard from '../components/Scoreboard';
 import LobbyPanel from '../components/online/LobbyPanel';
 import MatchOffer from '../components/online/MatchOffer';
+import OpponentAway from '../components/online/OpponentAway';
+import OpponentGone from '../components/online/OpponentGone';
+import TurnTimer from '../components/online/TurnTimer';
 import type { Difficulty } from '../game/bot';
 import { BLUE, RED, applyMove, makeInitials } from '../game/engine';
 import type { GameState, Player, PlayerId } from '../game/engine';
@@ -17,6 +20,25 @@ import { deserializeState } from '../shared/state';
 import type { LobbyPlayer } from '../shared/protocol';
 
 type RematchState = 'none' | 'sent' | 'received';
+
+/** A match that ended because the opponent is gone — kept for the "what now?" choice. */
+interface EndedMatch {
+  state: GameState;
+  side: PlayerId;
+  opponentName: string;
+  reason: 'opponent_left' | 'opponent_disconnected';
+}
+
+const deadlineIn = (ms: number | null) => (ms === null ? null : Date.now() + ms);
+
+function seatPlayers(selfSide: PlayerId, selfName: string, oppName: string): [Player, Player] {
+  const mine = { name: selfName, initials: makeInitials(selfName) };
+  const theirs = { name: oppName, initials: makeInitials(oppName) };
+  return [
+    { ...RED, ...(selfSide === 0 ? mine : theirs) },
+    { ...BLUE, ...(selfSide === 1 ? mine : theirs) },
+  ];
+}
 
 export default function Online() {
   const navigate = useNavigate();
@@ -35,19 +57,30 @@ export default function Online() {
   const [game, setGame] = useState<GameState | null>(null);
   const [rematch, setRematch] = useState<RematchState>('none');
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [turnDeadline, setTurnDeadline] = useState<number | null>(null);
+  const [opponentAway, setOpponentAway] = useState<number | null>(null); // grace deadline
+  const [ended, setEnded] = useState<EndedMatch | null>(null);
+  const [robot, setRobot] = useState(false); // bot took over an abandoned game
 
   const bot = useBotGame(difficulty);
 
   const clientRef = useRef<OnlineClient | null>(null);
   const gameRef = useRef<GameState | null>(null);
+  const matchRef = useRef<{ side: PlayerId; opponentName: string } | null>(null);
+  const offlineRef = useRef(false); // choosing after a lost opponent, or playing the bot
+  const resumingRef = useRef(false);
   useEffect(() => {
     gameRef.current = game;
-  }, [game]);
+    matchRef.current = match;
+    offlineRef.current = ended !== null || robot;
+  }, [game, match, ended, robot]);
 
   const clearMatch = useCallback(() => {
     setMatch(null);
     setGame(null);
     setRematch('none');
+    setTurnDeadline(null);
+    setOpponentAway(null);
   }, []);
 
   // ── connection lifecycle ─────────────────────────────────────────────────
@@ -59,16 +92,23 @@ export default function Online() {
     const offMessage = client.onMessage((msg) => {
       switch (msg.t) {
         case 'welcome': {
-          // Fires on every (re)connect: the server treats us as brand new.
+          setMe({ id: msg.id, name: msg.name });
+          if (msg.resumed) {
+            // Our held seat was restored; match_start with the live board follows.
+            resumingRef.current = true;
+            if (gameRef.current) toast.success('Reconnected — your game continues.');
+            break;
+          }
+          // Otherwise the server treats us as brand new.
           const lostMatch = gameRef.current !== null;
           clearMatch();
           setOffer(null);
           setOfferPending(false);
+          if (offlineRef.current) break; // deciding what's next / playing the bot — leave it
           bot.reset();
-          setMe({ id: msg.id, name: msg.name });
           setQueued(true);
           client.enqueue();
-          if (lostMatch) toast.error('Connection lost — your match ended. Back in the queue.');
+          if (lostMatch) toast.error('Connection lost for too long — your match ended. Back in the queue.');
           break;
         }
         case 'lobby':
@@ -99,10 +139,15 @@ export default function Online() {
             setOffer(null);
             setOfferPending(false);
             setQueued(false);
+            setEnded(null);
+            setRobot(false);
             setRematch('none');
+            setOpponentAway(null);
             setMatch({ side: msg.side, opponentName: msg.opponentName });
             setGame(state);
-            toast.success(`Matched with ${msg.opponentName} — game on!`);
+            setTurnDeadline(deadlineIn(msg.turnMs));
+            if (!resumingRef.current) toast.success(`Matched with ${msg.opponentName} — game on!`);
+            resumingRef.current = false;
           } catch {
             client.requestSync();
           }
@@ -111,6 +156,15 @@ export default function Online() {
         case 'move_applied': {
           const g = gameRef.current;
           if (!g) break;
+          setTurnDeadline(deadlineIn(msg.turnMs));
+          if (msg.auto) {
+            const mine = g.current === matchRef.current?.side;
+            toast(
+              mine
+                ? "Time's up — a random line was drawn for you."
+                : 'Opponent ran out of time — a random line was drawn for them.'
+            );
+          }
           const r = applyMove(g, msg.edge);
           if (!r || r.next.turn !== msg.turn) {
             client.requestSync(); // desync — ask for the authoritative state
@@ -122,25 +176,39 @@ export default function Online() {
         case 'state':
           try {
             setGame(deserializeState(msg.state));
+            setTurnDeadline(deadlineIn(msg.turnMs));
           } catch {
             // ignore malformed sync
           }
+          break;
+        case 'opponent_away':
+          setOpponentAway(Date.now() + msg.graceMs);
+          setTurnDeadline(null);
+          break;
+        case 'opponent_back':
+          setOpponentAway(null);
+          setTurnDeadline(deadlineIn(msg.turnMs));
+          toast.success('Opponent is back — the game continues.');
           break;
         case 'rematch_requested':
           setRematch('received');
           toast(`${msg.byName} wants a rematch`);
           break;
-        case 'match_ended':
+        case 'match_ended': {
+          const g = gameRef.current;
+          const m = matchRef.current;
           clearMatch();
+          if (g && m) {
+            // Let the player choose: close, find another player, or play on vs the bot.
+            setQueued(false);
+            setEnded({ state: g, side: m.side, opponentName: m.opponentName, reason: msg.reason });
+            break;
+          }
           bot.reset();
           setQueued(true);
           client.enqueue();
-          toast(
-            msg.reason === 'opponent_disconnected'
-              ? 'Opponent disconnected — you win by forfeit. Back in the queue.'
-              : 'Opponent left the match. Back in the queue.'
-          );
           break;
+        }
         case 'move_rejected':
           break; // input is locked off-turn; a reject just means a raced click
       }
@@ -202,6 +270,21 @@ export default function Online() {
     client.enqueue();
   }, [bot, clearMatch]);
 
+  const findAnotherPlayer = useCallback(() => {
+    setEnded(null);
+    setRobot(false);
+    bot.reset();
+    setQueued(true);
+    clientRef.current?.enqueue();
+  }, [bot]);
+
+  const continueWithRobot = useCallback(() => {
+    if (!ended) return;
+    bot.resume(ended.state, (1 - ended.side) as PlayerId);
+    setEnded(null);
+    setRobot(true);
+  }, [bot, ended]);
+
   const leaveQueue = useCallback(() => {
     clientRef.current?.dequeue();
     setQueued(false);
@@ -217,19 +300,14 @@ export default function Online() {
   // ── derived view state ───────────────────────────────────────────────────
 
   const players: [Player, Player] = useMemo(() => {
-    if (match && me) {
-      const myName = { name: me.name, initials: makeInitials(me.name) };
-      const oppName = { name: match.opponentName, initials: makeInitials(match.opponentName) };
-      return [
-        { ...RED, ...(match.side === 0 ? myName : oppName) },
-        { ...BLUE, ...(match.side === 1 ? myName : oppName) },
-      ];
-    }
+    if (match && me) return seatPlayers(match.side, me.name, match.opponentName);
+    if (ended && me) return seatPlayers(ended.side, me.name, ended.opponentName);
+    if (robot) return seatPlayers((1 - bot.botSide) as PlayerId, me?.name ?? 'You', 'Bot');
     return [
       { ...RED, name: me?.name ?? 'You', initials: makeInitials(me?.name ?? 'You') },
       { ...BLUE, name: 'Bot', initials: 'BO' },
     ];
-  }, [match, me]);
+  }, [match, me, ended, robot, bot.botSide]);
 
   const inMatch = match !== null && game !== null;
 
@@ -266,7 +344,11 @@ export default function Online() {
 
         {connStatus !== 'open' && (
           <div className="mb-4 border border-[#FFD6D6] bg-[#FFF5F5] px-4 py-2.5 text-[13px] font-semibold text-[#B91C1C]">
-            Connection lost — reconnecting…
+            {connStatus === 'replaced'
+              ? 'This online session was opened in another tab — continue playing there.'
+              : inMatch
+                ? 'Connection lost — reconnecting… your seat is held for 90 seconds.'
+                : 'Connection lost — reconnecting…'}
           </div>
         )}
 
@@ -284,12 +366,29 @@ export default function Online() {
                   newGameConfirmDescription={`${match.opponentName} will be notified and the match will end.`}
                   newGameConfirmAction="Yes, leave match"
                 />
+                {opponentAway !== null ? (
+                  <OpponentAway opponentName={match.opponentName} deadline={opponentAway} />
+                ) : (
+                  !game.over &&
+                  turnDeadline !== null && (
+                    <TurnTimer
+                      deadline={turnDeadline}
+                      mine={game.current === match.side}
+                      color={players[game.current].color}
+                    />
+                  )
+                )}
                 <div className="relative mt-6">
                   <Board
                     state={game}
                     players={players}
                     onMove={onlineMove}
-                    locked={game.over || game.current !== match.side}
+                    locked={
+                      game.over ||
+                      game.current !== match.side ||
+                      opponentAway !== null ||
+                      connStatus !== 'open'
+                    }
                   />
                   <GameOver
                     state={game}
@@ -305,6 +404,49 @@ export default function Online() {
                     }
                     rematchDisabled={rematch === 'sent'}
                     secondaryLabel="Find new match"
+                  />
+                </div>
+              </>
+            ) : ended ? (
+              <>
+                <Scoreboard
+                  state={ended.state}
+                  players={players}
+                  onNewGame={leavePage}
+                  selfSide={ended.side}
+                  newGameLabel="Leave"
+                  newGameConfirmTitle="Leave online play?"
+                  newGameConfirmDescription="You'll return to the start screen."
+                  newGameConfirmAction="Yes, leave"
+                />
+                <div className="relative mt-6">
+                  <Board state={ended.state} players={players} onMove={() => {}} locked />
+                </div>
+              </>
+            ) : robot ? (
+              <>
+                <Scoreboard
+                  state={bot.state}
+                  players={players}
+                  onNewGame={findAnotherPlayer}
+                  botDifficulty={difficulty}
+                  onChangeDifficulty={setDifficulty}
+                  botSide={bot.botSide}
+                  selfSide={(1 - bot.botSide) as PlayerId}
+                  newGameLabel="Find a player"
+                  newGameConfirmTitle="Find a real player?"
+                  newGameConfirmDescription="This bot game ends and you join the queue (you can play a fresh bot game while you wait)."
+                  newGameConfirmAction="Yes, find a player"
+                />
+                <div className="relative mt-6">
+                  <Board state={bot.state} players={players} onMove={bot.move} locked={bot.botTurn} />
+                  <GameOver
+                    state={bot.state}
+                    players={players}
+                    onRematch={bot.reset}
+                    onNewPlayers={findAnotherPlayer}
+                    rematchLabel="Play the bot again"
+                    secondaryLabel="Find a real player"
                   />
                 </div>
               </>
@@ -375,6 +517,17 @@ export default function Online() {
           />
         </div>
       </div>
+
+      {ended && (
+        <OpponentGone
+          opponentName={ended.opponentName}
+          reason={ended.reason}
+          gameOver={ended.state.over}
+          onClose={leavePage}
+          onFindPlayer={findAnotherPlayer}
+          onPlayBot={continueWithRobot}
+        />
+      )}
 
       {offer && (
         <MatchOffer
