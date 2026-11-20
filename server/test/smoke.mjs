@@ -4,7 +4,8 @@
 // authoritative moves, wrong-turn rejection, full game, rematch + side swap,
 // leaving, offer decline order, malformed-message kicks, origin allowlist,
 // reconnect-and-resume within the grace period, tab takeover, turn timeout,
-// letter + 4-digit-tag identities, direct challenges and their rate limits.
+// letter + 4-digit-tag identities, direct challenges and their rate limits,
+// and a browser-style reconnect that reuses partysocket's `_pk` id.
 // Set SMOKE_SLOW=1 to also wait out the 90s reconnect grace period.
 
 const URL = process.env.SMOKE_URL ?? 'ws://localhost:8787/parties/lobby/global';
@@ -22,11 +23,13 @@ function assert(cond, label) {
 }
 
 class TestClient {
-  constructor(tag, origin = ORIGIN, token = null, initial = 'T') {
+  // `pk`: a client-chosen connection id, sent like partysocket's `_pk`.
+  constructor(tag, origin = ORIGIN, token = null, initial = 'T', pk = null) {
     this.tag = tag;
     this.backlog = [];
     this.waiters = [];
     const q = new URLSearchParams();
+    if (pk) q.set('_pk', pk);
     if (token) q.set('token', token);
     if (initial !== null) q.set('initial', initial);
     const url = `${URL}?${q}`;
@@ -337,15 +340,40 @@ async function reconnectTests() {
   assert(w3.resumed === true, 'new tab resumed the seat');
   await x3.waitFor('match_start');
 
+  console.log('— a retry reusing the connection id (as partysocket does) gets back in —');
+  // partysocket sends the same `_pk` on every reconnect. When the network
+  // drops, the retry can arrive before the server notices the old socket is
+  // dead: it must take the seat over, not be closed as the stale connection.
+  const pk = crypto.randomUUID();
+  const p1 = new TestClient('G4', ORIGIN, tA, 'T', pk);
+  await p1.opened;
+  await p1.waitFor('match_start');
+  await x3.closed;
+  const p2 = new TestClient('G5', ORIGIN, tA, 'T', pk); // p1 is still open server-side
+  let p2Code = null;
+  p2.closed.then((ev) => (p2Code = ev.code));
+  await p2.opened;
+  const w5 = await p2.waitFor('welcome');
+  assert(w5.resumed === true, 'retry with a reused connection id resumes the seat');
+  await p2.waitFor('match_start');
+  const old = await p1.closed; // the server finally drops the dead socket
+  assert(old.code === 4409, `dead socket closed as replaced (got ${old.code})`);
+  await sleep(300);
+  assert(p2Code === null, 'new connection survives the old one closing');
+
   console.log('— turn timer plays a random move after 30s —');
   // Board after one red line: it's Blue's turn. Nobody moves.
-  const auto = await y.waitFor('move_applied', 40000);
+  const [auto, autoP2] = await Promise.all([
+    y.waitFor('move_applied', 40000),
+    p2.waitFor('move_applied', 40000),
+  ]);
   assert(auto.auto === true, 'server auto-played the timed-out turn');
   assert(auto.turn === 2, 'auto move advanced the game');
+  assert(autoP2.turn === 2, 'reconnected player still receives moves');
 
   if (process.env.SMOKE_SLOW) {
     console.log('— no reconnect within 90s ends the match —');
-    x3.close();
+    p2.close();
     await y.waitFor('opponent_away');
     const gone = await y.waitFor('match_ended', 100000);
     assert(gone.reason === 'opponent_disconnected', 'remaining player told after grace period');
@@ -355,7 +383,7 @@ async function reconnectTests() {
     assert(w4.resumed === false, 'late reconnect starts fresh');
     x4.close();
   } else {
-    x3.close();
+    p2.close();
   }
   y.close();
 }

@@ -29,6 +29,16 @@ export default {
       if (!allowed) return new Response('Forbidden origin', { status: 403 });
     }
 
+    // Every socket must get its own connection id, so the server picks it.
+    // partysocket sends a `_pk` id and reuses it on every reconnect: a retry
+    // that arrives before the server has noticed the old socket died would
+    // share that socket's id, and the lobby would close the new connection
+    // as the "stale" one — the player could never get back into their game.
+    if (url.searchParams.has('_pk')) {
+      url.searchParams.delete('_pk');
+      request = new Request(url, request);
+    }
+
     return (
       (await routePartykitRequest(request, env)) ?? new Response('Not found', { status: 404 })
     );

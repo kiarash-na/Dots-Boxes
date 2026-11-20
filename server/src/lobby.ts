@@ -141,7 +141,7 @@ export class Lobby extends Server {
       if (stale) {
         const old = this.getConnection(stale.id);
         this.dropClient(stale.id);
-        old?.close(4409, 'Replaced by a newer connection');
+        if (old !== conn) old?.close(4409, 'Replaced by a newer connection');
       }
     }
 
