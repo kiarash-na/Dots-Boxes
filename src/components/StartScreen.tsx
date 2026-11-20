@@ -3,6 +3,7 @@ import { ArrowLeft, Bot, Globe, Users } from 'lucide-react';
 import { DIFFICULTIES } from '../game/bot';
 import type { Difficulty } from '../game/bot';
 import { makeInitials } from '../game/engine';
+import MoreGames from './MoreGames';
 
 interface StartScreenProps {
   onStart: (redName: string, blueName: string, botDifficulty?: Difficulty) => void;
@@ -104,6 +105,8 @@ export default function StartScreen({ onStart, onPlayOnline }: StartScreenProps)
         <p className="mt-8 text-center text-[12px] text-[#8A91A1]">
           10 × 10 dots · 81 boxes · close a box to go again
         </p>
+
+        <MoreGames />
       </div>
     );
   }

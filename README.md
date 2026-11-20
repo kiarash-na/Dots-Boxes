@@ -9,6 +9,9 @@ boxes wins.
 - Classic rule: closing a box grants an extra turn
 - Local two-player: enter two names, share one screen
 - Bot opponent with three difficulties
+- **Tic-tac-toe** (from *More games* on the home page): local two-player or
+  vs a bot (easy / medium / unbeatable hard), played as a scored series where
+  the first move alternates every round
 - Online: no accounts — pick a single letter (plus a random 4-digit tag), a
   live lobby, first-come-first-served queue or direct challenges, 30-second
   turns, reconnect within 90 seconds to resume, and a bot game to keep you
@@ -99,14 +102,17 @@ Anti-abuse measures:
 src/
 ├── game/engine.ts        Pure game logic: state, moves, scoring (no React)
 ├── game/bot.ts           Bot strategies (easy / medium / hard)
+├── games/tictactoe/      Tic-tac-toe: engine, minimax bot, SVG board
 ├── shared/               Protocol + state (de)serialization, used by client AND server
 ├── net/client.ts         Typed WebSocket client (auto-reconnect)
 ├── hooks/useBotGame.ts   Casual bot game while waiting in the queue
 ├── pages/Home.tsx        Offline / bot game screen
 ├── pages/Online.tsx      Online lobby, queue, matchmaking, live matches
+├── pages/TicTacToe.tsx   Tic-tac-toe start screen and series
 ├── components/
 │   ├── online/           Lobby panel, match-offer dialog
 │   ├── StartScreen.tsx   Mode picker + player-name entry
+│   ├── MoreGames.tsx     Links to the other mini games on the home page
 │   ├── Board.tsx         Interactive SVG board
 │   ├── Scoreboard.tsx    Live scores and turn indicator
 │   ├── GameOver.tsx      Winner panel with rematch
