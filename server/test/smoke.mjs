@@ -5,9 +5,11 @@
 // leaving, offer decline order, malformed-message kicks, origin allowlist,
 // reconnect-and-resume within the grace period, tab takeover, turn timeout,
 // letter + 4-digit-tag identities, direct challenges and their rate limits,
-// a browser-style reconnect that reuses partysocket's `_pk` id, and a kicked
-// client that never finishes the close handshake.
+// a browser-style reconnect that reuses partysocket's `_pk` id, both players
+// dropping at once, the ping/pong heartbeat, and a kicked client that never
+// finishes the close handshake.
 // Set SMOKE_SLOW=1 to also wait out the 90s reconnect grace period.
+// Surviving a server restart needs a restartable server: see test/restart.mjs.
 
 import http from 'node:http';
 import https from 'node:https';
@@ -238,6 +240,7 @@ async function main() {
 
   await challengeTests();
   await reconnectTests();
+  await heartbeatTests();
   await silentKickTest();
 
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
@@ -391,6 +394,62 @@ async function reconnectTests() {
     p2.close();
   }
   y.close();
+
+  console.log('— both players dropping at once keeps the match for both —');
+  // E.g. two windows on one machine that loses its network: neither player
+  // may come back to an empty board just because the other dropped too.
+  const both = await tokenMatch('J', 'L');
+  const redJ = both.mx.side === 0 ? both.x : both.y;
+  redJ.send({ t: 'move', edge: { orientation: 'v', row: 3, col: 3 } });
+  await Promise.all([both.x.waitFor('move_applied'), both.y.waitFor('move_applied')]);
+  both.x.close();
+  await both.y.waitFor('opponent_away');
+  both.y.close();
+  await sleep(300); // let the server notice both drops
+  const j2 = new TestClient('J2', ORIGIN, both.tA);
+  const wj = await j2.waitFor('welcome');
+  assert(wj.resumed === true, 'first player back is resumed');
+  const msj = await j2.waitFor('match_start');
+  assert(msj.state.turn === 1 && msj.turnMs === null, 'board kept, clock paused');
+  const stillAway = await j2.waitFor('opponent_away');
+  assert(stillAway.graceMs > 80000 && stillAway.graceMs <= 90000, `told the opponent is still away (${stillAway.graceMs}ms left)`);
+  const l2 = new TestClient('L2', ORIGIN, both.tB);
+  const wl = await l2.waitFor('welcome');
+  assert(wl.resumed === true, 'second player back is resumed too');
+  const msl = await l2.waitFor('match_start');
+  assert(msl.state.turn === 1 && typeof msl.turnMs === 'number', 'both back: clock running again');
+  const backJ = await j2.waitFor('opponent_back');
+  assert(typeof backJ.turnMs === 'number', 'first player told the opponent is back');
+  j2.send({ t: 'leave_match' });
+  await l2.waitFor('match_ended');
+  j2.close();
+  l2.close();
+}
+
+async function heartbeatTests() {
+  console.log('— heartbeat: ping is answered with pong —');
+  const hb = new TestClient('HB');
+  await hb.opened;
+  await hb.waitFor('welcome');
+  hb.send({ t: 'ping' });
+  const pong = await hb.waitFor('pong');
+  assert(pong.t === 'pong', 'server answers ping with pong');
+
+  console.log('— heartbeat: pings do not wipe malformed-message strikes —');
+  for (let i = 0; i < 7; i++) hb.send('not json'); // 7 strikes, one short of a kick
+  hb.send({ t: 'ping' });
+  await hb.waitFor('pong');
+  hb.send('not json'); // 8th strike
+  const kicked = await hb.closed;
+  assert(kicked.code === 4400, `still kicked on the 8th strike (got ${kicked.code})`);
+
+  console.log('— heartbeat: pings count toward the rate limit —');
+  const flood = new TestClient('FLOOD');
+  await flood.opened;
+  await flood.waitFor('welcome');
+  for (let i = 0; i < 101; i++) flood.send({ t: 'ping' });
+  const limited = await flood.closed;
+  assert(limited.code === 4429, `101 pings in 10s get you rate limited (got ${limited.code})`);
 }
 
 // A raw WebSocket that reads but never answers the server's close frame —

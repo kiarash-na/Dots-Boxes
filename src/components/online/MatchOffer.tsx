@@ -1,8 +1,9 @@
 import { Swords } from 'lucide-react';
 import type { OfferKind, PublicPlayer } from '../../shared/protocol';
-import PlayerTag from './PlayerTag';
+import Matchup from './Matchup';
 
 interface MatchOfferProps {
+  me: PublicPlayer | null; // shown in the dialog: the page header is behind the overlay
   opponent: PublicPlayer;
   expiresInMs: number;
   kind: OfferKind;
@@ -13,6 +14,7 @@ interface MatchOfferProps {
 }
 
 export default function MatchOffer({
+  me,
   opponent,
   expiresInMs,
   kind,
@@ -25,18 +27,25 @@ export default function MatchOffer({
   const label = `${opponent.initial} #${opponent.tag}`;
   return (
     <div className="fixed inset-0 z-20 flex items-end justify-center bg-[#10131A]/30 p-4 backdrop-blur-[2px] sm:items-center">
-      <div className="gameover-in w-full max-w-sm bg-white p-6 shadow-[0_24px_60px_-24px_rgba(16,19,26,0.45)] ring-1 ring-[#EEF0F5]">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="match-offer-title"
+        className="gameover-in w-full max-w-sm bg-white p-6 shadow-[0_24px_60px_-24px_rgba(16,19,26,0.45)] ring-1 ring-[#EEF0F5]"
+      >
         <div className="flex items-center gap-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-[#10131A] text-white">
             <Swords size={20} strokeWidth={2.2} />
           </span>
-          <div className="min-w-0">
-            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#8A91A1]">
-              {challenge ? (fromMe ? 'Challenge sent' : 'You are challenged') : 'Opponent found'}
-            </p>
-            <PlayerTag player={opponent} className="text-[22px] tracking-[-0.02em] text-[#10131A]" />
-          </div>
+          <p
+            id="match-offer-title"
+            className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#8A91A1]"
+          >
+            {challenge ? (fromMe ? 'Challenge sent' : 'You are challenged') : 'Opponent found'}
+          </p>
         </div>
+
+        <Matchup me={me} opponent={opponent} className="mt-4" />
 
         {fromMe || pending ? (
           <>

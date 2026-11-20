@@ -16,6 +16,10 @@ export const CHALLENGE_MAX = 3;
 export const CHALLENGE_WINDOW_MS = 60_000;
 /** … and no re-challenging the same player within this long after a no. */
 export const CHALLENGE_COOLDOWN_MS = 30_000;
+/** Heartbeat: the client pings this often while connected … */
+export const HEARTBEAT_MS = 20_000;
+/** … and reconnects when it has heard nothing for this long and a ping went unanswered. */
+export const HEARTBEAT_TIMEOUT_MS = 45_000;
 
 export type ClientMessage =
   | { t: 'enqueue' } // join the matchmaking queue
@@ -25,7 +29,8 @@ export type ClientMessage =
   | { t: 'sync' } // request a full state resend (desync recovery)
   | { t: 'rematch' } // request / accept a rematch after game over
   | { t: 'leave_match' } // resign / walk away from a match
-  | { t: 'challenge'; tag: string }; // ask a specific lobby player for a match
+  | { t: 'challenge'; tag: string } // ask a specific lobby player for a match
+  | { t: 'ping' }; // heartbeat — answered with 'pong', changes nothing else
 
 // ─── Server → Client ────────────────────────────────────────────────────────
 
@@ -49,7 +54,9 @@ export type OfferKind = 'queue' | 'challenge';
 
 export type ServerMessage =
   // Sent on every (re)connect. `resumed`: your held match seat was restored —
-  // a `match_start` with the current board follows; keep your match UI.
+  // a `match_start` with the current board follows (then `opponent_away` if
+  // the opponent hasn't reconnected yet, e.g. after a server restart); keep
+  // your match UI. Not resumed: the server has no seat for you any more.
   | { t: 'welcome'; id: string; me: PublicPlayer; resumed: boolean }
   | { t: 'lobby'; players: LobbyPlayer[] } // full snapshot, broadcast on change
   | { t: 'queue'; position: number | null; size: number } // your place in line
@@ -74,7 +81,8 @@ export type ServerMessage =
   | { t: 'opponent_back'; turnMs: number | null } // opponent reconnected in time
   | { t: 'rematch_requested'; by: PublicPlayer } // opponent wants a rematch
   | { t: 'challenge_failed'; reason: 'unavailable' | 'busy' | 'rate_limited' | 'cooldown' }
-  | { t: 'match_ended'; reason: 'opponent_left' | 'opponent_disconnected' };
+  | { t: 'match_ended'; reason: 'opponent_left' | 'opponent_disconnected' }
+  | { t: 'pong' }; // answer to 'ping'
 
 /** Serializable form of GameState (Int8Arrays → plain number arrays). */
 export interface NetState {

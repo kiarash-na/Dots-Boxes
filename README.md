@@ -84,8 +84,21 @@ or rejects them. No client message is ever relayed verbatim to anyone.
 - **Reconnects:** every tab sends a secret token with its connection. If a
   player drops mid-match, their seat is held for 90 seconds (the clock pauses);
   coming back in time — even after a page reload — restores the same board,
-  side and identity. After 90 seconds the remaining player chooses to close,
-  find another player, or continue the same game against the robot.
+  side and identity. If both players drop at once, each gets their own 90
+  seconds. After 90 seconds the remaining player chooses to close, find
+  another player, or continue the same game against the robot.
+- **Server restarts:** a deploy or runtime restart wipes the Durable Object's
+  memory, so live matches (board, seats, identities, rematch votes, absolute
+  deadlines) are written to Durable Object storage on every change and
+  restored on start-up. Every socket is gone after a restart, so restored
+  seats are held for 90 seconds like any dropped player's; a match whose hold
+  already ran out while the server was down is discarded.
+- **Heartbeat:** the client pings every 20s and reconnects on its own when it
+  hears nothing for ~45s, so a socket that died silently (laptop sleep,
+  network switch) doesn't sit "open" while the seat hold runs out.
+- **Seat lost anyway:** if the server can't give a player their seat back,
+  the last board stays on screen and they get the same choice — close, find
+  another player, or finish that game against the robot.
 
 Anti-abuse measures:
 
@@ -95,6 +108,12 @@ Anti-abuse measures:
 - Origin allowlist on the WebSocket handshake (`ALLOWED_ORIGINS`)
 - No logins, no chat, no free-text anywhere — a single A–Z letter is the only input
 - Challenge rate limits (3/min per sender, 30s per-target cooldown)
+
+Testing the server (from `server/`): with `npm run dev` running,
+`node test/smoke.mjs` covers matches, challenges, reconnects, the heartbeat and
+abuse cases. `node test/restart.mjs` needs no running server: it starts its
+own `wrangler dev` (port 8791, throwaway storage), kills and restarts it
+mid-match, and checks both players get their game back.
 
 ## Project structure
 

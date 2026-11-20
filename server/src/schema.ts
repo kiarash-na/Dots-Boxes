@@ -30,4 +30,5 @@ export const clientMessageSchema: z.ZodType<ClientMessage> = z.discriminatedUnio
   z.object({ t: z.literal('rematch') }),
   z.object({ t: z.literal('leave_match') }),
   z.object({ t: z.literal('challenge'), tag: z.string().regex(/^\d{4}$/) }),
+  z.object({ t: z.literal('ping') }),
 ]);

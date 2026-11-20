@@ -9,6 +9,7 @@ import LobbyPanel from '../components/online/LobbyPanel';
 import MatchOffer from '../components/online/MatchOffer';
 import OpponentAway from '../components/online/OpponentAway';
 import OpponentGone from '../components/online/OpponentGone';
+import type { GoneReason } from '../components/online/OpponentGone';
 import InitialPicker from '../components/online/InitialPicker';
 import PlayerTag from '../components/online/PlayerTag';
 import TurnTimer from '../components/online/TurnTimer';
@@ -24,12 +25,12 @@ import type { LobbyPlayer, OfferKind, PublicPlayer } from '../shared/protocol';
 
 type RematchState = 'none' | 'sent' | 'received';
 
-/** A match that ended because the opponent is gone — kept for the "what now?" choice. */
+/** A match that can't go on (opponent gone, or our seat lost) — kept for the "what now?" choice. */
 interface EndedMatch {
   state: GameState;
   side: PlayerId;
   opponent: PublicPlayer;
-  reason: 'opponent_left' | 'opponent_disconnected';
+  reason: GoneReason;
 }
 
 const deadlineIn = (ms: number | null) => (ms === null ? null : Date.now() + ms);
@@ -92,13 +93,15 @@ export default function Online() {
   const matchRef = useRef<{ side: PlayerId; opponent: PublicPlayer } | null>(null);
   const offerRef = useRef<typeof offer>(null);
   const offlineRef = useRef(false); // choosing after a lost opponent, or playing the bot
+  const queuedRef = useRef(false);
   const resumingRef = useRef(false);
   useEffect(() => {
     gameRef.current = game;
     matchRef.current = match;
     offerRef.current = offer;
     offlineRef.current = ended !== null || robot;
-  }, [game, match, offer, ended, robot]);
+    queuedRef.current = queued;
+  }, [game, match, offer, ended, robot, queued]);
 
   const clearMatch = useCallback(() => {
     setMatch(null);
@@ -114,27 +117,41 @@ export default function Online() {
     const client = new OnlineClient(initial);
     clientRef.current = client;
     const offStatus = client.onStatus(setConnStatus);
+    let welcomed = false; // first welcome since going online (later ones are reconnects)
 
     const offMessage = client.onMessage((msg) => {
       switch (msg.t) {
         case 'welcome': {
           setMe({ id: msg.id, ...msg.me });
+          const first = !welcomed;
+          welcomed = true;
           if (msg.resumed) {
             // Our held seat was restored; match_start with the live board follows.
             resumingRef.current = true;
             if (gameRef.current) toast.success('Reconnected — your game continues.');
             break;
           }
-          // Otherwise the server treats us as brand new.
-          const lostMatch = gameRef.current !== null;
-          clearMatch();
+          // Otherwise the server treats us as brand new: any offer is gone…
           setOffer(null);
           setOfferPending(false);
+          const g = gameRef.current;
+          const m = matchRef.current;
+          clearMatch();
+          if (g && m) {
+            // … and so is our seat (held too long, or lost by the server).
+            // Keep the last board and let the player choose what's next.
+            setQueued(false);
+            setEnded({ state: g, side: m.side, opponent: m.opponent, reason: 'connection_lost' });
+            break;
+          }
           if (offlineRef.current) break; // deciding what's next / playing the bot — leave it
-          bot.reset();
-          setQueued(true);
-          client.enqueue();
-          if (lostMatch) toast.error('Connection lost for too long — your match ended. Back in the queue.');
+          if (first) {
+            bot.reset();
+            setQueued(true);
+            client.enqueue();
+          } else if (queuedRef.current) {
+            client.enqueue(); // the server forgot our place; keep the bot game going
+          }
           break;
         }
         case 'lobby':
@@ -611,7 +628,8 @@ export default function Online() {
 
       {ended && (
         <OpponentGone
-          opponentName={playerLabel(ended.opponent)}
+          me={me}
+          opponent={ended.opponent}
           reason={ended.reason}
           gameOver={ended.state.over}
           onClose={leavePage}
@@ -622,6 +640,7 @@ export default function Online() {
 
       {offer && (
         <MatchOffer
+          me={me}
           opponent={offer.opponent}
           expiresInMs={offer.expiresInMs}
           kind={offer.kind}
