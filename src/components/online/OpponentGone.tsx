@@ -1,9 +1,12 @@
-import { Bot, Unplug, Users, X } from 'lucide-react';
+import { Bot, Unplug, Users, WifiOff, X } from 'lucide-react';
 import type { PublicPlayer } from '../../shared/protocol';
 import Matchup from './Matchup';
 
-/** Why the match can't go on: the opponent left, or never came back. */
-export type GoneReason = 'opponent_left' | 'opponent_disconnected';
+/**
+ * Why the match can't go on: the opponent left, the opponent never came back,
+ * or *our* connection dropped and the server couldn't give us our seat back.
+ */
+export type GoneReason = 'opponent_left' | 'opponent_disconnected' | 'connection_lost';
 
 interface OpponentGoneProps {
   me: PublicPlayer | null;
@@ -24,9 +27,13 @@ const COPY: Record<GoneReason, { title: string; body: string }> = {
     title: 'Opponent didn’t come back',
     body: 'They were disconnected for too long. What would you like to do?',
   },
+  connection_lost: {
+    title: 'Connection lost',
+    body: 'You were disconnected and this match couldn’t be resumed. Your last board is kept — what would you like to do?',
+  },
 };
 
-/** The opponent is gone for good: close, find another player, or let a bot take over. */
+/** The match is over for good: close, find another player, or let a bot take over. */
 export default function OpponentGone({
   me,
   opponent,
@@ -37,6 +44,7 @@ export default function OpponentGone({
   onPlayBot,
 }: OpponentGoneProps) {
   const copy = COPY[reason];
+  const Icon = reason === 'connection_lost' ? WifiOff : Unplug;
   return (
     <div className="fixed inset-0 z-20 flex items-end justify-center bg-[#10131A]/30 p-4 backdrop-blur-[2px] sm:items-center">
       <div
@@ -47,7 +55,7 @@ export default function OpponentGone({
       >
         <div className="flex items-center gap-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-[#10131A] text-white">
-            <Unplug size={20} strokeWidth={2.2} />
+            <Icon size={20} strokeWidth={2.2} />
           </span>
           <p
             id="opponent-gone-title"

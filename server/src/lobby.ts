@@ -11,6 +11,12 @@
 // continues. Turns are limited to TURN_MS — on timeout the server plays a
 // random legal move for the idle player.
 //
+// Restarts: every deploy, runtime update or eviction restarts this object and
+// wipes its memory, so live matches are written through to Durable Object
+// storage on every change and restored in onStart(). All sockets are gone
+// after a restart, so restored seats start "away" and are held like any
+// dropped player's — whoever comes back in time gets their game back.
+//
 // Identity: players pick a single letter; the server adds a random 4-digit
 // tag. Besides the FIFO queue, a player may challenge a specific lobby player
 // by tag — rate limited per sender and per target.
@@ -28,8 +34,14 @@ import {
   RECONNECT_GRACE_MS,
   TURN_MS,
 } from '../../src/shared/protocol';
-import type { LobbyPlayer, OfferKind, PublicPlayer, ServerMessage } from '../../src/shared/protocol';
-import { serializeState } from '../../src/shared/state';
+import type {
+  LobbyPlayer,
+  NetState,
+  OfferKind,
+  PublicPlayer,
+  ServerMessage,
+} from '../../src/shared/protocol';
+import { deserializeState, serializeState } from '../../src/shared/state';
 import { parseInitial, randomTag } from './names';
 
 const OFFER_TTL_MS = 15_000; // match offer expires if not answered
@@ -39,6 +51,7 @@ const RATE_MAX_MESSAGES = 100; // … per window, per connection (humans peak ~5
 const MAX_MESSAGE_BYTES = 2048; // every legit message is well under 200 bytes
 const MAX_STRIKES = 8; // malformed messages before the connection is dropped
 const TOKEN_RE = /^[A-Za-z0-9-]{16,64}$/;
+const MATCH_KEY = 'match:'; // storage key prefix: one record per live match
 
 type ClientStatus = 'idle' | 'queued' | 'offered' | 'playing';
 
@@ -70,7 +83,8 @@ interface Seat {
   id: string; // connection id (stale while the player is away)
   token: string | null;
   me: PublicPlayer;
-  away: ReturnType<typeof setTimeout> | null; // grace timer while disconnected
+  awayUntil: number | null; // while disconnected: epoch ms the held seat is released
+  awayTimer: ReturnType<typeof setTimeout> | null; // fires at awayUntil
 }
 
 interface Match {
@@ -82,7 +96,38 @@ interface Match {
   turnDeadline: number | null; // epoch ms, null when paused / over
 }
 
+/** A match as written to storage — enough to resume it after a restart. */
+interface StoredMatch {
+  v: 1;
+  id: string;
+  // Index = side (0 plays Red). Only matches where both seats carry a token
+  // are stored: nobody else could ever claim a seat back.
+  seats: [StoredSeat, StoredSeat];
+  state: NetState;
+  rematchVotes: string[]; // tokens
+  turnDeadline: number | null; // absolute epoch ms
+  savedAt: number;
+}
+
+interface StoredSeat {
+  token: string;
+  me: PublicPlayer;
+  awayUntil: number | null; // absolute epoch ms
+}
+
 const voteKey = (s: Seat) => s.token ?? s.id;
+const isAway = (s: Seat) => s.awayUntil !== null;
+
+/** Rebuild a stored seat, or null if the record is not one we wrote. */
+function parseStoredSeat(raw: unknown): StoredSeat | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const s = raw as Partial<StoredSeat>;
+  if (typeof s.token !== 'string' || !TOKEN_RE.test(s.token)) return null;
+  if (!s.me || typeof s.me.initial !== 'string' || !/^[A-Z?]$/.test(s.me.initial)) return null;
+  if (typeof s.me.tag !== 'string' || !/^\d{4}$/.test(s.me.tag)) return null;
+  if (s.awayUntil !== null && typeof s.awayUntil !== 'number') return null;
+  return { token: s.token, me: { initial: s.me.initial, tag: s.me.tag }, awayUntil: s.awayUntil };
+}
 
 export class Lobby extends Server {
   clients = new Map<string, ClientInfo>();
@@ -150,6 +195,120 @@ export class Lobby extends Server {
     if (++c.strikes >= MAX_STRIKES) this.kick(conn, 4400, 'Too many invalid messages');
   }
 
+  // ── persistence: live matches survive restarts ──────────────────────────
+  // Write-through on every change; writes are cheap and never awaited (the
+  // runtime holds outgoing messages until they are durable). Only matches
+  // live in storage: presence, the queue and offers are rebuilt as players
+  // reconnect.
+
+  private saveMatch(m: Match) {
+    if (this.matches.get(m.id) !== m) return; // already over
+    const [a, b] = m.seats;
+    if (!a.token || !b.token) return; // no token, no resume — nothing worth keeping
+    const record: StoredMatch = {
+      v: 1,
+      id: m.id,
+      seats: [
+        { token: a.token, me: a.me, awayUntil: a.awayUntil },
+        { token: b.token, me: b.me, awayUntil: b.awayUntil },
+      ],
+      state: serializeState(m.state),
+      rematchVotes: [...m.rematchVotes],
+      turnDeadline: m.turnDeadline,
+      savedAt: Date.now(),
+    };
+    this.ctx.storage
+      .put(MATCH_KEY + m.id, record)
+      .catch((err) => console.error('lobby: saving match failed', err));
+  }
+
+  private forgetMatch(id: string) {
+    this.ctx.storage
+      .delete(MATCH_KEY + id)
+      .catch((err) => console.error('lobby: deleting match failed', err));
+  }
+
+  /**
+   * Runs once per start, before any connection is accepted. It must never
+   * throw: a failing onStart would refuse every player's connect.
+   */
+  async onStart() {
+    try {
+      const now = Date.now();
+      const records = await this.ctx.storage.list({ prefix: MATCH_KEY });
+      const dead: string[] = [];
+      for (const [key, raw] of records) {
+        const m = this.reviveMatch(key, raw, now);
+        if (!m) {
+          dead.push(key);
+          continue;
+        }
+        this.matches.set(m.id, m);
+        this.saveMatch(m); // pin the new hold deadlines
+      }
+      for (let i = 0; i < dead.length; i += 128) {
+        await this.ctx.storage.delete(dead.slice(i, i + 128));
+      }
+      if (records.size) {
+        console.log(`lobby: restored ${this.matches.size} match(es), dropped ${dead.length}`);
+      }
+    } catch (err) {
+      console.error('lobby: restoring matches failed', err);
+    }
+  }
+
+  /**
+   * Turn a stored record back into a live match with both seats held, or
+   * null when it is malformed or no seat could still be claimed in time.
+   */
+  private reviveMatch(key: string, raw: unknown, now: number): Match | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const r = raw as Partial<StoredMatch>;
+    if (r.v !== 1 || typeof r.id !== 'string' || key !== MATCH_KEY + r.id) return null;
+    if (!Array.isArray(r.seats) || r.seats.length !== 2) return null;
+    const seats = r.seats.map(parseStoredSeat);
+    if (!seats[0] || !seats[1] || seats[0].token === seats[1].token) return null;
+    let state: GameState;
+    try {
+      state = deserializeState(r.state as NetState);
+    } catch {
+      return null;
+    }
+
+    // When did the previous instance die? Not after any deadline it had
+    // pending: at each one it would have written a newer record (a timed-out
+    // turn is auto-played, an expired seat ends the match). So a seat that
+    // was connected lost its socket by `lastAlive` at the latest, and is held
+    // for the usual grace from then. If any seat's hold already ran out —
+    // the object sat evicted for a while — the match would have ended: drop it.
+    const deadlines = [r.turnDeadline, seats[0].awayUntil, seats[1].awayUntil].filter(
+      (t): t is number => typeof t === 'number'
+    );
+    const lastAlive = Math.min(now, ...deadlines);
+    const holds = seats.map((s) => s!.awayUntil ?? lastAlive + RECONNECT_GRACE_MS);
+    if (holds.some((t) => t <= now)) return null;
+
+    const tokens = new Set(seats.map((s) => s!.token));
+    const m: Match = {
+      id: r.id,
+      seats: [0, 1].map((i) => ({
+        id: `restored:${i}`, // never a real connection id
+        token: seats[i]!.token,
+        me: seats[i]!.me,
+        awayUntil: null,
+        awayTimer: null,
+      })) as [Seat, Seat],
+      state,
+      rematchVotes: new Set(
+        (Array.isArray(r.rematchVotes) ? r.rematchVotes : []).filter((t) => tokens.has(t))
+      ),
+      turnTimer: null,
+      turnDeadline: null, // paused until both players are back
+    };
+    m.seats.forEach((s, i) => this.holdSeatUntil(m, s, holds[i]));
+    return m;
+  }
+
   // ── lifecycle ────────────────────────────────────────────────────────────
 
   onConnect(conn: Connection, ctx: ConnectionContext) {
@@ -177,8 +336,9 @@ export class Lobby extends Server {
     if (seat) {
       me = seat.match.seats[seat.side].me; // same identity as before the drop
     } else {
+      // Held seats (including ones restored after a restart) keep their tags.
       const taken = new Set([...this.clients.values()].map((c) => c.me.tag));
-      for (const m of this.matches.values()) for (const s of m.seats) if (s.away) taken.add(s.me.tag);
+      for (const m of this.matches.values()) for (const s of m.seats) taken.add(s.me.tag);
       let initial: string | null = null;
       try {
         initial = new URL(ctx.request.url).searchParams.get('initial');
@@ -276,6 +436,10 @@ export class Lobby extends Server {
         return;
       case 'challenge':
         return this.challenge(c, msg.tag);
+      case 'ping':
+        // Heartbeat: lets the client spot a silently dead socket. Counts
+        // toward the rate limit above, and deliberately touches nothing else.
+        return this.sendTo(c.id, { t: 'pong' });
     }
   }
 
@@ -464,8 +628,8 @@ export class Lobby extends Server {
     const match: Match = {
       id: crypto.randomUUID(),
       seats: [
-        { id: a, token: ca.token, me: ca.me, away: null },
-        { id: b, token: cb.token, me: cb.me, away: null },
+        { id: a, token: ca.token, me: ca.me, awayUntil: null, awayTimer: null },
+        { id: b, token: cb.token, me: cb.me, awayUntil: null, awayTimer: null },
       ],
       state: newGame(),
       rematchVotes: new Set(),
@@ -477,6 +641,7 @@ export class Lobby extends Server {
     this.removeFromQueue(b);
 
     this.startTurnTimer(match);
+    this.saveMatch(match);
     this.seat(a, match, cb.me, 0);
     this.seat(b, match, ca.me, 1);
     this.broadcastLobby();
@@ -505,7 +670,7 @@ export class Lobby extends Server {
   /** Send to both seats (no-op for a seat whose player is away). */
   private sendMatch(m: Match, msg: ServerMessage) {
     const raw = JSON.stringify(msg);
-    for (const s of m.seats) if (!s.away) this.sendRaw(this.getConnection(s.id), raw);
+    for (const s of m.seats) if (!isAway(s)) this.sendRaw(this.getConnection(s.id), raw);
   }
 
   // ── turn timer ───────────────────────────────────────────────────────────
@@ -523,7 +688,7 @@ export class Lobby extends Server {
   /** (Re)start the clock for whoever moves now. Paused while a player is away. */
   private startTurnTimer(m: Match) {
     this.stopTurnTimer(m);
-    if (m.state.over || m.seats.some((s) => s.away)) return;
+    if (m.state.over || m.seats.some(isAway)) return;
     m.turnDeadline = Date.now() + TURN_MS;
     m.turnTimer = setTimeout(() => {
       m.turnTimer = null;
@@ -536,37 +701,46 @@ export class Lobby extends Server {
 
   private findAwaySeat(token: string): { match: Match; side: PlayerId } | null {
     for (const m of this.matches.values()) {
-      const side = m.seats.findIndex((s) => s.away && s.token === token);
+      const side = m.seats.findIndex((s) => isAway(s) && s.token === token);
       if (side !== -1) return { match: m, side: side as PlayerId };
     }
     return null;
+  }
+
+  /** Mark `seat` away and release it (ending the match) at `until`. */
+  private holdSeatUntil(m: Match, seat: Seat, until: number) {
+    if (seat.awayTimer) clearTimeout(seat.awayTimer);
+    seat.awayUntil = until;
+    seat.awayTimer = setTimeout(
+      () => {
+        seat.awayTimer = null;
+        this.endMatch(m.id, seat.id, 'opponent_disconnected');
+      },
+      Math.max(0, until - Date.now())
+    );
   }
 
   /** Player dropped: keep their seat for RECONNECT_GRACE_MS, pause the clock. */
   private holdSeat(m: Match, id: string) {
     const side = this.sideOf(m, id);
     if (side === -1) return;
-    const seat = m.seats[side];
-    if (seat.away) clearTimeout(seat.away);
-    seat.away = setTimeout(() => {
-      seat.away = null;
-      this.endMatch(m.id, seat.id, 'opponent_disconnected');
-    }, RECONNECT_GRACE_MS);
+    this.holdSeatUntil(m, m.seats[side], Date.now() + RECONNECT_GRACE_MS);
     this.stopTurnTimer(m);
     const other = m.seats[1 - side];
-    if (!other.away) {
+    // If both dropped (one flaky network, a blip on the server's side), both
+    // seats are held — each player gets their own grace period to come back.
+    if (!isAway(other)) {
       this.sendTo(other.id, { t: 'opponent_away', graceMs: RECONNECT_GRACE_MS });
-    } else {
-      // Both players are gone — nobody is left to wait; drop the match.
-      this.endMatch(m.id, id, 'opponent_disconnected');
     }
+    this.saveMatch(m);
   }
 
   /** The same player is back in time: give them their seat and continue. */
   private resumeSeat(id: string, m: Match, side: PlayerId) {
     const seat = m.seats[side];
-    if (seat.away) clearTimeout(seat.away);
-    seat.away = null;
+    if (seat.awayTimer) clearTimeout(seat.awayTimer);
+    seat.awayTimer = null;
+    seat.awayUntil = null;
     seat.id = id;
     const c = this.clients.get(id);
     if (c) {
@@ -575,11 +749,18 @@ export class Lobby extends Server {
     }
     const other = m.seats[1 - side];
     this.startTurnTimer(m);
+    this.saveMatch(m);
     this.seat(id, m, other.me, side);
     if (m.rematchVotes.has(voteKey(other))) {
       this.sendTo(id, { t: 'rematch_requested', by: other.me });
     }
-    this.sendTo(other.id, { t: 'opponent_back', turnMs: this.turnMsLeft(m) });
+    if (other.awayUntil !== null) {
+      // The opponent is still gone too (e.g. after a server restart): the
+      // returning player waits for them, clock paused.
+      this.sendTo(id, { t: 'opponent_away', graceMs: Math.max(0, other.awayUntil - Date.now()) });
+    } else {
+      this.sendTo(other.id, { t: 'opponent_back', turnMs: this.turnMsLeft(m) });
+    }
   }
 
   private playMove(c: ClientInfo, edge: Edge) {
@@ -587,7 +768,7 @@ export class Lobby extends Server {
     if (!m || m.state.over) return;
     const side = this.sideOf(m, c.id);
     if (side === -1) return;
-    if (m.seats.some((s) => s.away)) {
+    if (m.seats.some(isAway)) {
       this.sendTo(c.id, { t: 'move_rejected', reason: 'opponent_away' });
       return;
     }
@@ -606,6 +787,7 @@ export class Lobby extends Server {
     if (!result) return false;
     m.state = result.next;
     this.startTurnTimer(m);
+    this.saveMatch(m);
     this.sendMatch(m, {
       t: 'move_applied',
       edge,
@@ -633,7 +815,8 @@ export class Lobby extends Server {
     m.rematchVotes.add(voteKey(m.seats[side]));
     const other = m.seats[1 - side];
     if (m.rematchVotes.size < 2) {
-      if (!other.away) this.sendTo(other.id, { t: 'rematch_requested', by: c.me });
+      this.saveMatch(m);
+      if (!isAway(other)) this.sendTo(other.id, { t: 'rematch_requested', by: c.me });
       return;
     }
     // Both agreed: fresh board, colors swapped.
@@ -641,6 +824,7 @@ export class Lobby extends Server {
     m.rematchVotes.clear();
     m.seats.reverse();
     this.startTurnTimer(m);
+    this.saveMatch(m);
     m.seats.forEach((s, i) => this.seat(s.id, m, m.seats[1 - i].me, i as PlayerId));
   }
 
@@ -649,11 +833,13 @@ export class Lobby extends Server {
     const m = this.matches.get(matchId);
     if (!m) return;
     this.matches.delete(matchId);
+    this.forgetMatch(matchId);
     this.stopTurnTimer(m);
     for (const s of m.seats) {
-      if (s.away) clearTimeout(s.away);
-      const wasAway = s.away !== null;
-      s.away = null;
+      if (s.awayTimer) clearTimeout(s.awayTimer);
+      const wasAway = isAway(s);
+      s.awayTimer = null;
+      s.awayUntil = null;
       const c = this.clients.get(s.id);
       if (!c || c.matchId !== matchId) continue;
       c.matchId = null;
