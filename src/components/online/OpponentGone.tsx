@@ -1,23 +1,42 @@
 import { Bot, Unplug, Users, X } from 'lucide-react';
+import type { PublicPlayer } from '../../shared/protocol';
+import Matchup from './Matchup';
+
+/** Why the match can't go on: the opponent left, or never came back. */
+export type GoneReason = 'opponent_left' | 'opponent_disconnected';
 
 interface OpponentGoneProps {
-  opponentName: string;
-  reason: 'opponent_left' | 'opponent_disconnected';
+  me: PublicPlayer | null;
+  opponent: PublicPlayer;
+  reason: GoneReason;
   gameOver: boolean; // the board was already finished — the bot starts fresh
   onClose: () => void;
   onFindPlayer: () => void;
   onPlayBot: () => void;
 }
 
+const COPY: Record<GoneReason, { title: string; body: string }> = {
+  opponent_left: {
+    title: 'Opponent left',
+    body: 'They left the match. What would you like to do?',
+  },
+  opponent_disconnected: {
+    title: 'Opponent didn’t come back',
+    body: 'They were disconnected for too long. What would you like to do?',
+  },
+};
+
 /** The opponent is gone for good: close, find another player, or let a bot take over. */
 export default function OpponentGone({
-  opponentName,
+  me,
+  opponent,
   reason,
   gameOver,
   onClose,
   onFindPlayer,
   onPlayBot,
 }: OpponentGoneProps) {
+  const copy = COPY[reason];
   return (
     <div className="fixed inset-0 z-20 flex items-end justify-center bg-[#10131A]/30 p-4 backdrop-blur-[2px] sm:items-center">
       <div
@@ -30,24 +49,17 @@ export default function OpponentGone({
           <span className="flex h-11 w-11 shrink-0 items-center justify-center bg-[#10131A] text-white">
             <Unplug size={20} strokeWidth={2.2} />
           </span>
-          <div className="min-w-0">
-            <p className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#8A91A1]">
-              {reason === 'opponent_left' ? 'Opponent left' : 'Opponent didn’t come back'}
-            </p>
-            <p
-              id="opponent-gone-title"
-              className="truncate text-[19px] font-extrabold tracking-[-0.02em] text-[#10131A]"
-            >
-              {opponentName}
-            </p>
-          </div>
+          <p
+            id="opponent-gone-title"
+            className="text-[11px] font-bold uppercase tracking-[0.14em] text-[#8A91A1]"
+          >
+            {copy.title}
+          </p>
         </div>
 
-        <p className="mt-4 text-[14px] leading-relaxed text-[#5A6070]">
-          {reason === 'opponent_left'
-            ? 'They left the match. What would you like to do?'
-            : 'They were disconnected for too long. What would you like to do?'}
-        </p>
+        <Matchup me={me} opponent={opponent} className="mt-4" />
+
+        <p className="mt-4 text-[14px] leading-relaxed text-[#5A6070]">{copy.body}</p>
 
         <div className="mt-5 space-y-2">
           <button

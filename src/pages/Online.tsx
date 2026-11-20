@@ -611,7 +611,8 @@ export default function Online() {
 
       {ended && (
         <OpponentGone
-          opponentName={playerLabel(ended.opponent)}
+          me={me}
+          opponent={ended.opponent}
           reason={ended.reason}
           gameOver={ended.state.over}
           onClose={leavePage}
@@ -622,6 +623,7 @@ export default function Online() {
 
       {offer && (
         <MatchOffer
+          me={me}
           opponent={offer.opponent}
           expiresInMs={offer.expiresInMs}
           kind={offer.kind}
