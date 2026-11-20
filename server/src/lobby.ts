@@ -93,8 +93,35 @@ export class Lobby extends Server {
 
   // ── small helpers ────────────────────────────────────────────────────────
 
+  /**
+   * Never throws. Sending to a socket we already closed (its close handshake
+   * may never finish) throws in workerd; uncaught, that aborted whatever
+   * handler was running — including every new player's connect.
+   */
+  private sendRaw(conn: Connection | undefined, raw: string) {
+    try {
+      conn?.send(raw);
+    } catch {
+      // closed or closing — nothing to deliver
+    }
+  }
+
   private sendTo(id: string, msg: ServerMessage) {
-    this.getConnection(id)?.send(JSON.stringify(msg));
+    this.sendRaw(this.getConnection(id), JSON.stringify(msg));
+  }
+
+  private closeQuietly(conn: Connection | undefined, code: number, reason: string) {
+    try {
+      conn?.close(code, reason);
+    } catch {
+      // already closed
+    }
+  }
+
+  /** Disconnect a client and forget it now, not when its close completes. */
+  private kick(conn: Connection, code: number, reason: string) {
+    this.dropClient(conn.id);
+    this.closeQuietly(conn, code, reason);
   }
 
   private broadcastLobby() {
@@ -120,7 +147,7 @@ export class Lobby extends Server {
   }
 
   private strike(c: ClientInfo, conn: Connection) {
-    if (++c.strikes >= MAX_STRIKES) conn.close(4400, 'Too many invalid messages');
+    if (++c.strikes >= MAX_STRIKES) this.kick(conn, 4400, 'Too many invalid messages');
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -141,7 +168,7 @@ export class Lobby extends Server {
       if (stale) {
         const old = this.getConnection(stale.id);
         this.dropClient(stale.id);
-        if (old !== conn) old?.close(4409, 'Replaced by a newer connection');
+        if (old !== conn) this.closeQuietly(old, 4409, 'Replaced by a newer connection');
       }
     }
 
@@ -174,9 +201,7 @@ export class Lobby extends Server {
       challengesSent: [],
       challengeBlocks: new Map(),
     });
-    conn.send(
-      JSON.stringify({ t: 'welcome', id: conn.id, me, resumed: !!seat } satisfies ServerMessage)
-    );
+    this.sendTo(conn.id, { t: 'welcome', id: conn.id, me, resumed: !!seat });
     if (seat) this.resumeSeat(conn.id, seat.match, seat.side);
     this.broadcastLobby();
     this.sendQueuePositions();
@@ -212,7 +237,7 @@ export class Lobby extends Server {
 
   onMessage(conn: Connection, raw: string) {
     const c = this.clients.get(conn.id);
-    if (!c) return conn.close(4401, 'Unknown connection');
+    if (!c) return this.closeQuietly(conn, 4401, 'Unknown connection');
 
     // Rate limit: a real player sends a handful of messages per game.
     const now = Date.now();
@@ -220,7 +245,7 @@ export class Lobby extends Server {
       c.windowStart = now;
       c.windowCount = 0;
     }
-    if (++c.windowCount > RATE_MAX_MESSAGES) return conn.close(4429, 'Rate limited');
+    if (++c.windowCount > RATE_MAX_MESSAGES) return this.kick(conn, 4429, 'Rate limited');
 
     if (typeof raw !== 'string' || raw.length > MAX_MESSAGE_BYTES) {
       return this.strike(c, conn);
@@ -241,7 +266,7 @@ export class Lobby extends Server {
       case 'offer_response':
         return this.answerOffer(c, msg.accept);
       case 'move':
-        return this.playMove(conn, c, msg.edge);
+        return this.playMove(c, msg.edge);
       case 'sync':
         return this.resync(c);
       case 'rematch':
@@ -480,7 +505,7 @@ export class Lobby extends Server {
   /** Send to both seats (no-op for a seat whose player is away). */
   private sendMatch(m: Match, msg: ServerMessage) {
     const raw = JSON.stringify(msg);
-    for (const s of m.seats) if (!s.away) this.getConnection(s.id)?.send(raw);
+    for (const s of m.seats) if (!s.away) this.sendRaw(this.getConnection(s.id), raw);
   }
 
   // ── turn timer ───────────────────────────────────────────────────────────
@@ -557,21 +582,21 @@ export class Lobby extends Server {
     this.sendTo(other.id, { t: 'opponent_back', turnMs: this.turnMsLeft(m) });
   }
 
-  private playMove(conn: Connection, c: ClientInfo, edge: Edge) {
+  private playMove(c: ClientInfo, edge: Edge) {
     const m = c.matchId ? this.matches.get(c.matchId) : undefined;
     if (!m || m.state.over) return;
     const side = this.sideOf(m, c.id);
     if (side === -1) return;
     if (m.seats.some((s) => s.away)) {
-      conn.send(JSON.stringify({ t: 'move_rejected', reason: 'opponent_away' } satisfies ServerMessage));
+      this.sendTo(c.id, { t: 'move_rejected', reason: 'opponent_away' });
       return;
     }
     if (m.state.current !== side) {
-      conn.send(JSON.stringify({ t: 'move_rejected', reason: 'not_your_turn' } satisfies ServerMessage));
+      this.sendTo(c.id, { t: 'move_rejected', reason: 'not_your_turn' });
       return;
     }
     if (!this.commitMove(m, edge, false)) {
-      conn.send(JSON.stringify({ t: 'move_rejected', reason: 'edge_taken' } satisfies ServerMessage));
+      this.sendTo(c.id, { t: 'move_rejected', reason: 'edge_taken' });
     }
   }
 

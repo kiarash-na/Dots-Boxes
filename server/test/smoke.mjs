@@ -5,8 +5,12 @@
 // leaving, offer decline order, malformed-message kicks, origin allowlist,
 // reconnect-and-resume within the grace period, tab takeover, turn timeout,
 // letter + 4-digit-tag identities, direct challenges and their rate limits,
-// and a browser-style reconnect that reuses partysocket's `_pk` id.
+// a browser-style reconnect that reuses partysocket's `_pk` id, and a kicked
+// client that never finishes the close handshake.
 // Set SMOKE_SLOW=1 to also wait out the 90s reconnect grace period.
+
+import http from 'node:http';
+import https from 'node:https';
 
 const URL = process.env.SMOKE_URL ?? 'ws://localhost:8787/parties/lobby/global';
 const ORIGIN = process.env.SMOKE_ORIGIN ?? 'http://localhost:3000';
@@ -234,6 +238,7 @@ async function main() {
 
   await challengeTests();
   await reconnectTests();
+  await silentKickTest();
 
   console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`);
   process.exit(failures === 0 ? 0 : 1);
@@ -386,6 +391,58 @@ async function reconnectTests() {
     p2.close();
   }
   y.close();
+}
+
+// A raw WebSocket that reads but never answers the server's close frame —
+// like a client on a dead network, or a hostile one.
+function silentClient() {
+  const u = new globalThis.URL(URL.replace(/^ws/, 'http'));
+  const key = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString('base64');
+  return new Promise((resolve, reject) => {
+    const req = (u.protocol === 'https:' ? https : http).request({
+      hostname: u.hostname,
+      port: u.port || undefined,
+      path: `${u.pathname}?initial=S`,
+      headers: {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Key': key,
+        Origin: ORIGIN,
+      },
+    });
+    req.on('upgrade', (_res, socket) => {
+      socket.on('data', () => {}); // never reply — the close stays pending
+      socket.on('error', () => {});
+      resolve({
+        send(text) {
+          const payload = Buffer.from(text);
+          const mask = Buffer.from(crypto.getRandomValues(new Uint8Array(4)));
+          const masked = payload.map((b, i) => b ^ mask[i % 4]);
+          socket.write(Buffer.concat([Buffer.from([0x81, 0x80 | payload.length]), mask, masked]));
+        },
+        destroy: () => socket.destroy(),
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function silentKickTest() {
+  console.log('— a kicked client that never finishes closing cannot break the lobby —');
+  const s = await silentClient();
+  await sleep(200);
+  for (let i = 0; i < 8; i++) s.send('x'); // 8 malformed messages → kicked (4400)
+  await sleep(300);
+  const fresh = new TestClient('FRESH');
+  const res = await Promise.race([
+    fresh.waitFor('welcome').then(() => 'welcome'),
+    fresh.closed.then((ev) => `closed ${ev.code}`),
+  ]);
+  assert(res === 'welcome', `new players can still join (${res})`);
+  fresh.close();
+  s.destroy();
 }
 
 main().catch((err) => {
